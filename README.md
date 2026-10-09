@@ -138,15 +138,87 @@ Because emergency response relies on computational feasibility:
 
 ---
 
-## 9. System Limitations & Academic Transparency (7-Point Scope)
+## 9. System Limitations & Academic Transparency (10-Point Scope)
 
 > [!IMPORTANT]
 > **Prototype Disclaimers & Limitations**:
-> 1. **Building Topology**: Facility layout is a synthetic 7-node academic demonstration model (`ROOM_A` through `EXIT_B`).
-> 2. **Zone Mapping**: Detections are associated with a demonstration building edge; not calibrated to geometric camera homography.
-> 3. **Input Ingestion**: Uploaded images/videos are ingested as CCTV surveillance test frames.
-> 4. **Real Deployment Requirements**: Field implementation requires camera calibration matrices, optical overlap, and CAD floor-plans.
-> 5. **Actuator Guidance**: PA and LED guidance shown in this dashboard are software simulations.
-> 6. **AI Models**: Real pretrained YOLOv8 Nano checkpoints running in CPU mode.
-> 7. **Dynamic Routing**: Shortest-path calculations are computed dynamically by NetworkX Dijkstra.
+> 1. **Building Topology**: Facility layout is a synthetic 7-node academic demonstration model (`ROOM_A` through `EXIT_B`), with an optional dual-floor vertical digital twin expansion (`GF` and `L1` joined via `STAIR_1`).
+> 2. **Zone Mapping**: Detections are mapped to demonstration building zones; not calibrated to real geometric camera homography or perspective transformations.
+> 3. **Input Ingestion**: Media files are ingested as simulated CCTV surveillance test frames.
+> 4. **Real Deployment Requirements**: Field deployment requires real calibrated camera matrices, optical overlap, and CAD architectural blueprints.
+> 5. **Actuator Guidance**: PA system and LED exit sign states shown are software simulations; no physical building actuators, FACP relays, or hardware are connected.
+> 6. **AI Models**: Real pretrained YOLOv8 Nano checkpoints running in CPU mode (`models/fire_smoke_yolov8n.pt` and `models/yolov8n.pt`).
+> 7. **Dynamic Routing**: Shortest-path calculations are computed dynamically in real time via NetworkX Dijkstra optimization based on active edge weights: $\text{Cost}(e) = \alpha H(e) + \beta D(e) + \gamma L(e)$. Decisions are never hardcoded.
+> 8. **Benchmark & Metric Transparency**: Perception confidence scores represent per-detection model output, not static dataset benchmark accuracies. False-alarm rates, precision, recall, and mAP require ground-truth labelled test sets and are labeled as "Not yet benchmarked" rather than hallucinated.
+> 9. **Camera Coverage & Occlusion**: Multi-camera coverage quality and lens occlusions are simulated to demonstrate camera-fault-aware routing penalties.
+> 10. **Assistance Engine**: The Emergency Decision Assistant uses deterministic, rule-based reasoning grounded solely in live system telemetry to explain routing decisions.
+
+---
+
+## 10. AI Smart Building Emergency Command Center Features
+
+The application incorporates a multi-mode command center designed for academic reviews, viva examinations, and research demonstrations:
+
+### Two Operational Modes
+- **🔬 RESEARCH MODE**: In-depth telemetry, interactive edge weight tuning ($\alpha, \beta, \gamma$), sensitivity sweep plots, research disclaimers, and model evaluation metrics.
+- **🚨 EMERGENCY COMMAND MODE**: High-contrast, rapid-triage interface with prominent alert banners, immediate evacuation routing, digital signage indicators, and one-click incident logging.
+
+### 9 Command Center Navigation Tabs
+1. **📊 OVERVIEW**: Incident severity triage HUD, multi-zone risk priority table, and real-time evacuation efficiency index.
+2. **📹 LIVE CCTV**: 4-channel surveillance grid (`CAM-01` to `CAM-04`) with latency, FPS, coverage health, and simulated feeds.
+3. **🏢 BUILDING DIGITAL TWIN**: Interactive NetworkX 2D topology with highlighted evacuation path and toggleable Multi-Floor digital twin (`Ground Floor` + `First Floor` via `STAIR_1`).
+4. **🧭 EVACUATION & ROUTING**: Dynamic route breakdown, bottleneck identification, vulnerable occupant priority simulation, and detour explanations.
+5. **🔔 ALERTS & DISPATCH**: Directional signage LED indicators, automated PA announcement script, and security guard dispatch audit logs.
+6. **📈 ANALYTICS & TELEMETRY**: Temporal hazard trends with 3-point moving average forecasts, frame processing latency charts, and Dijkstra execution timers.
+7. **🤖 XAI & DECISION ASSISTANT**: Deterministic, rule-based query assistant answering: *"Why was the evacuation route changed?"*, *"Why is Exit A avoided?"*, *"What caused the hazard spike in Corridor 1?"*, and *"Which camera detected the fire?"*.
+8. **🧪 VALIDATION & BENCHMARKS**: Parameter sensitivity analysis ($\alpha, \beta, \gamma$ sweep), comparative baseline routing comparison, and ground-truth benchmark guidelines.
+9. **📑 REPORTS & INCIDENT REPLAY**: Interactive time-slider incident replay and multi-format digital incident report export (`TXT`, `JSON`, `CSV`).
+
+### 10 Academic Demonstration Scenarios
+- **01 NORMAL BASELINE**: All zones clear, optimal path to EXIT_A.
+- **02 SMOKE DETECTION**: Moderate smoke in Corridor 1, automatic detour.
+- **03 FIRE EMERGENCY**: High fire hazard near Exit A, reroutes to Exit B.
+- **04 HIGH CROWD STAMPEDE**: Dense crowd in Corridor 1, congestion avoidance.
+- **05 COMPOUND HAZARD**: Concurrent fire and dense crowd, multi-zone avoidance.
+- **06 CAMERA OCCLUSION**: Cam-02 lens obstructed, coverage penalty injected.
+- **07 EXIT BLOCKED**: Exit A completely compromised, exit closure protocol.
+- **08 MULTI-ZONE HAZARD**: Simultaneous fire and smoke across multiple corridors.
+- **09 CROWD + SMOKE EVACUATION**: Moderate smoke with panicking crowd.
+- **10 MULTI-CAM DISPATCH**: Cross-channel multi-incident alert dispatch.
+- **▶ RUN FULL DEMO**: Sequential walkthrough transitioning from Normal to Emergency and Recovery.
+
+---
+
+## 11. IEEE Requirement Traceability Matrix
+
+| Requirement / Module | Description | Implementation File | Verification Test |
+| :--- | :--- | :--- | :--- |
+| **REQ-01: Fire/Smoke Perception** | YOLOv8n dual hazard detection (classes 0: smoke, 1: fire) | [`detection/fire_detector.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/detection/fire_detector.py) | `tests/test_full_system.py` (Tests 1-3) |
+| **REQ-02: Crowd/Person Perception** | YOLOv8n crowd estimation (COCO class 0: person) | [`detection/crowd_detector.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/detection/crowd_detector.py) | `tests/test_full_system.py` (Tests 4-5) |
+| **REQ-03: Building Graph Topology** | NetworkX 7-node topological model with edge lengths | [`graph/building_graph.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/graph/building_graph.py) | `tests/test_full_system.py` (Tests 6-7) |
+| **REQ-04: Dynamic Edge Cost** | Weight formulation: $\text{Cost}(e) = \alpha H(e) + \beta D(e) + \gamma L(e)$ | [`graph/dijkstra_optimizer.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/graph/dijkstra_optimizer.py) | `tests/test_full_system.py` (Test 8) |
+| **REQ-05: Dynamic Dijkstra Routing** | Real-time path optimization & continuous rerouting | [`graph/dijkstra_optimizer.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/graph/dijkstra_optimizer.py) | `tests/test_full_system.py` (Tests 9-10) |
+| **REQ-06: End-to-End System Pipeline** | Multi-zone mapping, telemetry, route events | [`integration/evacuation_system.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/integration/evacuation_system.py) | `tests/test_end_to_end.py` (Steps 1-12) |
+| **REQ-07: Alert & Signage Dispatch** | Automated PA, directional signage, security logs | [`alerts/alert_manager.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/alerts/alert_manager.py) | `tests/test_full_system.py` (Test 13) |
+| **REQ-08: Command Center Presentation** | 9 tabs, 2 operational modes, telemetry & analytics | [`dashboard/app.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/dashboard/app.py) | `tests/test_full_system.py` (Test 12) |
+| **REQ-09: Multi-Floor Digital Twin** | Dual-floor topological graph with vertical stairwell | [`graph/multi_floor_graph.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/graph/multi_floor_graph.py) | `tests/test_advanced_features.py` (Tests 4-5) |
+| **REQ-10: Multi-Camera Simulation** | 4-channel CCTV grid with occlusion & uncertainty penalties | [`integration/multi_camera_sim.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/integration/multi_camera_sim.py) | `tests/test_advanced_features.py` (Tests 1-3) |
+| **REQ-11: Decision Explainability (XAI)** | Deterministic telemetry-grounded viva query assistant | [`integration/decision_assistant.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/integration/decision_assistant.py) | `tests/test_advanced_features.py` (Tests 9-10) |
+| **REQ-12: Multi-Format Incident Reports** | Exportable audit trails in TXT, JSON, and CSV formats | [`dashboard/components.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/dashboard/components.py) | `tests/test_advanced_features.py` (Tests 6-8) |
+
+---
+
+## 12. Complete Test Suite Execution
+
+```bash
+# 1. Run Advanced Features Test Suite (10 Tests)
+python tests/test_advanced_features.py
+
+# 2. Run Functional Test Suite (14 Tests)
+python tests/test_full_system.py
+
+# 3. Run Complete End-to-End Test Suite (12 Steps)
+python tests/test_end_to_end.py
+```
+
 

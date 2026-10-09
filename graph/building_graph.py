@@ -271,31 +271,64 @@ class BuildingGraph:
         hazardous_edges: Optional[List[Tuple[str, str]]] = None,
         congested_edges: Optional[List[Tuple[str, str]]] = None,
         system_state: str = "NORMAL",
-        output_path: Optional[Path] = None
+        output_path: Optional[Path] = None,
+        dark_mode: bool = True
     ) -> plt.Figure:
         """
         Feature 14 — Graph Visualization:
         Renders an interactive 2D floor-plan visualization displaying:
         - Rooms, Corridors, Emergency Exits
-        - Hazardous edges (Red dashed)
-        - Congested edges (Orange)
-        - Current evacuation route (Vibrant Green)
-        - Previous route (Grey dashed)
-        - System states: NORMAL, CAUTION, EMERGENCY, ROUTE CHANGED
+        - Hazardous edges (Crimson Red dashed)
+        - Congested edges (Amber Orange solid)
+        - Current evacuation route (Vibrant Neon Green solid)
+        - Previous route (Slate Grey dashed)
+        - High-tech Dark Theme / Command Center palette support
         """
         fig, ax = plt.subplots(figsize=(10, 6))
 
+        if dark_mode:
+            fig.patch.set_facecolor('#070B14')
+            ax.set_facecolor('#0D1424')
+
         pos = {n: (self.graph.nodes[n]["x"], self.graph.nodes[n]["y"]) for n in self.graph.nodes}
 
-        color_map = {
-            self.NODE_TYPE_ROOM: "#42A5F5",       # Bright Blue
-            self.NODE_TYPE_CORRIDOR: "#FFA726",   # Amber / Orange
-            self.NODE_TYPE_EXIT: "#66BB6A"        # Emerald Green
-        }
+        if dark_mode:
+            color_map = {
+                self.NODE_TYPE_ROOM: "#38BDF8",       # Cyber Sky Blue
+                self.NODE_TYPE_CORRIDOR: "#F59E0B",   # Amber / Orange
+                self.NODE_TYPE_EXIT: "#10B981"        # Emerald Green
+            }
+            origin_color = "#FBBF24"                  # Bright Gold Origin
+            base_edge_col = "#334155"                 # Slate Navy Base
+            prev_edge_col = "#64748B"                 # Muted Slate
+            congest_col = "#F59E0B"                   # Amber Congestion
+            hazard_col = "#EF4444"                    # Crimson Hazard
+            route_col = "#00FF88"                     # Vibrant Neon Emerald Route
+            node_border_col = "#070B14"
+            edge_lbl_bg = "#121C30"
+            edge_lbl_border = "#283D63"
+            edge_lbl_txt = "#94A3B8"
+        else:
+            color_map = {
+                self.NODE_TYPE_ROOM: "#42A5F5",
+                self.NODE_TYPE_CORRIDOR: "#FFA726",
+                self.NODE_TYPE_EXIT: "#66BB6A"
+            }
+            origin_color = "#FFD54F"
+            base_edge_col = "#78909C"
+            prev_edge_col = "#9E9E9E"
+            congest_col = "#FF9800"
+            hazard_col = "#E53935"
+            route_col = "#00C853"
+            node_border_col = "#263238"
+            edge_lbl_bg = "#F5F5F5"
+            edge_lbl_border = "#CFD8DC"
+            edge_lbl_txt = "#263238"
+
         node_colors = []
         for n in self.graph.nodes:
             if source_room and n == source_room:
-                node_colors.append("#FFD54F")     # Bright Gold for active origin
+                node_colors.append(origin_color)
             else:
                 node_colors.append(color_map.get(self.graph.nodes[n].get("node_type"), "#BDBDBD"))
 
@@ -305,7 +338,7 @@ class BuildingGraph:
             pos,
             ax=ax,
             width=2.5,
-            edge_color="#78909C",
+            edge_color=base_edge_col,
             style="solid"
         )
 
@@ -323,7 +356,7 @@ class BuildingGraph:
                     edgelist=prev_edges,
                     ax=ax,
                     width=4.0,
-                    edge_color="#9E9E9E",   # Grey dashed
+                    edge_color=prev_edge_col,
                     style="dashed"
                 )
 
@@ -337,7 +370,7 @@ class BuildingGraph:
                     edgelist=c_edges,
                     ax=ax,
                     width=4.5,
-                    edge_color="#FF9800",   # Amber / Orange
+                    edge_color=congest_col,
                     style="solid"
                 )
 
@@ -355,7 +388,7 @@ class BuildingGraph:
                     edgelist=h_edges,
                     ax=ax,
                     width=4.5,
-                    edge_color="#E53935",   # Red Hazard
+                    edge_color=hazard_col,
                     style="dashed"
                 )
 
@@ -373,7 +406,7 @@ class BuildingGraph:
                     edgelist=route_edges,
                     ax=ax,
                     width=5.5,
-                    edge_color="#00C853",   # Bright Evacuation Green
+                    edge_color=route_col,
                     style="solid"
                 )
 
@@ -384,7 +417,7 @@ class BuildingGraph:
             ax=ax,
             node_size=1900,
             node_color=node_colors,
-            edgecolors="#263238",
+            edgecolors=node_border_col,
             linewidths=2.5
         )
 
@@ -408,30 +441,52 @@ class BuildingGraph:
             pos,
             edge_labels=edge_labels,
             font_size=8,
-            font_color="#263238",
-            bbox=dict(boxstyle="round,pad=0.2", facecolor="#F5F5F5", edgecolor="#CFD8DC", alpha=0.9)
+            font_color=edge_lbl_txt,
+            bbox=dict(boxstyle="round,pad=0.2", facecolor=edge_lbl_bg, edgecolor=edge_lbl_border, alpha=0.95)
         )
 
         # 9. Dynamic State Styling & Legend
-        state_colors = {
+        state_colors_dark = {
+            "NORMAL": "#10B981",
+            "CAUTION": "#F59E0B",
+            "EMERGENCY": "#EF4444",
+            "WARNING": "#F97316",
+            "ROUTE CHANGED": "#A855F7"
+        }
+        state_colors_light = {
             "NORMAL": "#2E7D32",
             "CAUTION": "#F57C00",
             "EMERGENCY": "#D32F2F",
-            "ROUTE CHANGED": "#E65100"
+            "WARNING": "#E65100",
+            "ROUTE CHANGED": "#6A1B9A"
         }
-        banner_color = state_colors.get(system_state.upper(), "#37474F")
+        state_colors = state_colors_dark if dark_mode else state_colors_light
+        banner_color = state_colors.get(system_state.upper(), "#00F0FF" if dark_mode else "#37474F")
 
         patches = [
-            mpatches.Patch(color="#FFD54F", label=f"Origin ({source_room})" if source_room else "Origin Room"),
-            mpatches.Patch(color="#00C853", label="Current Optimal Route"),
-            mpatches.Patch(color="#9E9E9E", label="Previous Route" if previous_route else "Baseline Edge"),
-            mpatches.Patch(color="#E53935", label="Hazardous / Monitored Edge"),
-            mpatches.Patch(color="#66BB6A", label="Emergency Exit")
+            mpatches.Patch(color=origin_color, label=f"Origin ({source_room})" if source_room else "Origin Room"),
+            mpatches.Patch(color=route_col, label="Current Optimal Route"),
+            mpatches.Patch(color=prev_edge_col, label="Previous Route" if previous_route else "Baseline Edge"),
+            mpatches.Patch(color=hazard_col, label="Hazardous / Monitored Edge"),
+            mpatches.Patch(color=color_map[self.NODE_TYPE_EXIT], label="Emergency Exit")
         ]
-        ax.legend(handles=patches, loc="upper right", framealpha=0.95, fontsize=8.5)
+
+        if dark_mode:
+            leg = ax.legend(handles=patches, loc="upper right", framealpha=0.92, fontsize=8.5, facecolor='#0D1424', edgecolor='#283D63')
+            for text in leg.get_texts():
+                text.set_color('#E2E8F0')
+            ax.tick_params(colors='#64748B')
+            ax.xaxis.label.set_color('#94A3B8')
+            ax.yaxis.label.set_color('#94A3B8')
+            ax.grid(True, linestyle="--", alpha=0.2, color='#1E293B')
+            for spine in ax.spines.values():
+                spine.set_edgecolor('#1E293B')
+        else:
+            ax.legend(handles=patches, loc="upper right", framealpha=0.95, fontsize=8.5)
+            ax.grid(True, linestyle="--", alpha=0.35)
 
         ax.set_title(
-            f"Topological Evacuation Graph — STATE: {system_state.upper()}",
+            f"Topological Evacuation Digital Twin — SYSTEM STATE: {system_state.upper()}",
             fontsize=12,
             fontweight="bold",
             color=banner_color,
@@ -439,7 +494,6 @@ class BuildingGraph:
         )
         ax.set_xlabel("X (meters)", fontsize=9)
         ax.set_ylabel("Y (meters)", fontsize=9)
-        ax.grid(True, linestyle="--", alpha=0.35)
         ax.set_axisbelow(True)
 
         x_vals = [p[0] for p in pos.values()]
@@ -452,7 +506,7 @@ class BuildingGraph:
         if output_path:
             out_p = Path(output_path)
             out_p.parent.mkdir(parents=True, exist_ok=True)
-            plt.savefig(str(out_p), dpi=200)
+            plt.savefig(str(out_p), dpi=200, facecolor=fig.get_facecolor(), edgecolor='none')
 
         return fig
 

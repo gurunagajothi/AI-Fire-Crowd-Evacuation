@@ -11,6 +11,7 @@ networkx>=3.0
 streamlit>=1.30.0
 matplotlib>=3.7.0
 pillow>=10.0.0
+pandas>=2.0.0
 
 # Configuration & Utilities
 numpy>=1.24.0
