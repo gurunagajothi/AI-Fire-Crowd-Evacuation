@@ -1,21 +1,24 @@
 """
-Integration Layer: Multi-Camera CCTV Simulation & Coverage / Occlusion Awareness.
-Implements Feature 1 (Multi-Camera Simulation) and Feature 13 (Coverage / Occlusion Analysis)
+Integration Layer: Multi-Camera CCTV Simulation & Hybrid Real/Simulated Stream Manager.
+Implements Feature 1 (Multi-Camera Management) and Feature 13 (Coverage / Occlusion Analysis)
 for the IEEE-Paper AI Evacuation System.
+Supports real VideoStreamHandler bindings (Webcam, USB, RTSP) alongside simulated feeds.
 """
 
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import datetime
 from pathlib import Path
 import cv2
 import numpy as np
 
 from config.config import DATA_DIR
+from video.video_stream import VideoStreamHandler
 
 
 class MultiCameraSimulator:
     """
-    Manages simulated software-only surveillance cameras positioned across building zones:
+    Manages hybrid software-simulated and physical/RTSP surveillance cameras
+    positioned across key egress building zones:
     - CAM-01: ROOM_A / CORRIDOR_1 (North Hallway)
     - CAM-02: CORRIDOR_2 (South Hallway)
     - CAM-03: EXIT_A (Emergency Exit North)
@@ -39,6 +42,7 @@ class MultiCameraSimulator:
                 "people_count": 0,
                 "crowd_density": 0.0,
                 "latency_ms": 0.0,
+                "is_real_stream": False,
                 "last_update": datetime.datetime.now().strftime("%H:%M:%S")
             },
             "CAM-02": {
@@ -56,6 +60,7 @@ class MultiCameraSimulator:
                 "people_count": 0,
                 "crowd_density": 0.0,
                 "latency_ms": 0.0,
+                "is_real_stream": False,
                 "last_update": datetime.datetime.now().strftime("%H:%M:%S")
             },
             "CAM-03": {
@@ -73,6 +78,7 @@ class MultiCameraSimulator:
                 "people_count": 0,
                 "crowd_density": 0.0,
                 "latency_ms": 0.0,
+                "is_real_stream": False,
                 "last_update": datetime.datetime.now().strftime("%H:%M:%S")
             },
             "CAM-04": {
@@ -90,9 +96,62 @@ class MultiCameraSimulator:
                 "people_count": 0,
                 "crowd_density": 0.0,
                 "latency_ms": 0.0,
+                "is_real_stream": False,
                 "last_update": datetime.datetime.now().strftime("%H:%M:%S")
             }
         }
+        # Real stream handles mapped by camera id
+        self.stream_handlers: Dict[str, VideoStreamHandler] = {}
+
+    def bind_stream(self, cam_id: str, stream: VideoStreamHandler):
+        """Binds an active physical or RTSP stream handler to a camera channel."""
+        if cam_id in self.cameras:
+            self.stream_handlers[cam_id] = stream
+            self.cameras[cam_id]["is_real_stream"] = True
+            self.cameras[cam_id]["source_type"] = f"LIVE {stream.source_type}"
+            self.cameras[cam_id]["status"] = "ONLINE" if stream.status == "CONNECTED" else stream.status
+
+    def unbind_stream(self, cam_id: str):
+        """Unbinds any physical stream from a camera channel and reverts to simulation."""
+        if cam_id in self.stream_handlers:
+            del self.stream_handlers[cam_id]
+        if cam_id in self.cameras:
+            self.cameras[cam_id]["is_real_stream"] = False
+            self.cameras[cam_id]["source_type"] = "SIMULATED CCTV SOURCE"
+            self.cameras[cam_id]["status"] = "ONLINE"
+
+    def capture_frame(self, cam_id: str) -> Tuple[bool, Optional[np.ndarray]]:
+        """
+        Retrieves a frame from the specified camera channel.
+        If a real stream is bound, pulls from the stream handler.
+        If simulated, reads the configured sample file.
+        """
+        if cam_id not in self.cameras:
+            return False, None
+
+        # Real stream branch
+        if cam_id in self.stream_handlers:
+            stream = self.stream_handlers[cam_id]
+            success, frame = stream.get_frame()
+            if success and frame is not None:
+                self.cameras[cam_id]["status"] = "ONLINE"
+                self.cameras[cam_id]["coverage"] = "GOOD"
+                return True, frame
+            else:
+                self.cameras[cam_id]["status"] = "UNAVAILABLE"
+                self.cameras[cam_id]["coverage"] = "UNAVAILABLE"
+                self.cameras[cam_id]["occlusion"] = "HIGH"
+                return False, None
+
+        # Simulated sample file branch
+        sample_name = self.cameras[cam_id].get("sample_file", "normal_sample.jpg")
+        sample_path = DATA_DIR / "test" / sample_name
+        if sample_path.exists():
+            frame = cv2.imread(str(sample_path))
+            if frame is not None:
+                return True, frame
+
+        return False, None
 
     def get_camera(self, cam_id: str) -> Optional[Dict[str, Any]]:
         return self.cameras.get(cam_id)

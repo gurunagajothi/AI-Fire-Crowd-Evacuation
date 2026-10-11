@@ -12,6 +12,7 @@ Research Experiment Mode, IEEE Traceability Matrix, and Academic Limitations.
 """
 
 from typing import List, Dict, Any, Tuple, Optional
+from pathlib import Path
 import datetime
 import json
 import pandas as pd
@@ -783,12 +784,57 @@ def render_explainable_ai_panel(current_route: List[str], normal_route: List[str
 # 10. TEMPORAL HAZARD TRENDS & SHORT-TERM FORECAST (Feature 5)
 # =============================================================================
 
-def render_temporal_trend_panel(history: List[Dict[str, Any]]):
+def render_temporal_trend_panel(history: List[Dict[str, Any]], tracker: Optional[Any] = None):
     """
     Renders Feature 5: Temporal Hazard Trend & Lightweight Short-Term Forecast.
+    Displays rolling time-window trend, slope (RISING, STABLE, FALLING),
+    consecutive-frame confirmation, cooldown status, and interactive telemetry charts.
     """
     st.markdown('<div class="section-header">Temporal Telemetry Trend &amp; Moving Average Forecast</div>', unsafe_allow_html=True)
-    st.caption("Transparent telemetry trend derived from recent consecutive frames &bull; Short-term moving average forecast.")
+    st.caption("Rolling temporal window &bull; Consecutive-frame hazard confirmation &bull; Short-term moving average forecast.")
+
+    # State colors mapping
+    state_badges = {
+        "NORMAL": ("#10B981", "🟢 NORMAL &bull; MONITORING NOMINAL"),
+        "MONITORING": ("#38BDF8", "🔵 MONITORING &bull; COOLDOWN ACTIVE"),
+        "RISK INCREASING": ("#FBBF24", "🟡 RISK INCREASING &bull; AWAITING CONFIRMATION"),
+        "SMOKE DETECTED": ("#F97316", "🟠 CONFIRMED SMOKE DETECTED"),
+        "FIRE DETECTED": ("#EF4444", "🔴 CONFIRMED FIRE DETECTED"),
+        "CAMERA UNAVAILABLE": ("#94A3B8", "⚪ CAMERA FEED UNAVAILABLE")
+    }
+
+    if tracker is not None and hasattr(tracker, "get_summary"):
+        summary = tracker.get_summary()
+        c_state = summary.get("current_state", "NORMAL")
+        slope_label = summary.get("slope", "STABLE")
+        slope_val = summary.get("slope_val", 0.0)
+        consec = summary.get("consecutive_hazard", 0)
+        thresh = summary.get("confirmation_threshold", 3)
+        conf_lbl = summary.get("confidence_label", "NOMINAL")
+        cooldown = summary.get("cooldown_remaining", 0)
+
+        badge_col, badge_text = state_badges.get(c_state, ("#38BDF8", f"🔵 {c_state}"))
+
+        st.markdown(f"""
+        <div style="background: rgba(15, 23, 42, 0.8); border-left: 4px solid {badge_col}; border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+            <div>
+                <span style="font-size: 0.72rem; color: #94A3B8; font-weight: 800; text-transform: uppercase;">TEMPORAL HAZARD STATE:</span>
+                <span style="font-size: 0.95rem; font-weight: 800; color: {badge_col}; margin-left: 8px;">{badge_text}</span>
+            </div>
+            <div style="font-size: 0.8rem; color: #CBD5E1;">
+                Consecutive Confirmation: <strong>{consec}/{thresh}</strong> ({conf_lbl}) &bull; Cooldown: <strong>{cooldown} frames</strong>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Plot DataFrame chart if tracker has history
+        df = tracker.get_dataframe()
+        if not df.empty and len(df) >= 2:
+            chart_df = df[["hazard_score", "crowd_density"]].copy()
+            chart_df.columns = ["Hazard Score", "Crowd Density"]
+            if "time_str" in df.columns:
+                chart_df.index = df["time_str"]
+            st.line_chart(chart_df, height=180, use_container_width=True)
 
     if not history or len(history) < 2:
         st.info("ℹ️ Awaiting sequential frame ingestion to establish trend. Process at least 2 frames or switch demo scenarios.")
@@ -803,24 +849,18 @@ def render_temporal_trend_panel(history: List[Dict[str, Any]]):
     delta_den = cur_den - prev_den
 
     if delta_haz > 0.05:
-        haz_trend = "RISING (ESCALATING)"
-        haz_col = "#EF4444"
+        haz_trend = "RISING ↗ (ESCALATING)"
     elif delta_haz < -0.05:
-        haz_trend = "FALLING (SUBSIDING)"
-        haz_col = "#10B981"
+        haz_trend = "FALLING ↘ (SUBSIDING)"
     else:
-        haz_trend = "STABLE"
-        haz_col = "#FBBF24"
+        haz_trend = "STABLE →"
 
     if delta_den > 0.05:
-        den_trend = "RISING (CONGESTING)"
-        den_col = "#EF4444"
+        den_trend = "RISING ↗ (CONGESTING)"
     elif delta_den < -0.05:
-        den_trend = "FALLING (CLEARING)"
-        den_col = "#10B981"
+        den_trend = "FALLING ↘ (CLEARING)"
     else:
-        den_trend = "STABLE"
-        den_col = "#38BDF8"
+        den_trend = "STABLE →"
 
     # 3-point moving average for short-term extrapolation
     recent_haz = [h.get("hazard_score", 0.0) for h in history[-3:]]
@@ -1230,22 +1270,93 @@ def generate_incident_report_csv(report_data: Dict[str, Any]) -> str:
 # 20. EXISTING RENDERERS (Preserved with backward compatibility)
 # =============================================================================
 
-def render_route_history_table(route_history: List[Dict[str, Any]]):
+def render_route_history_table(
+    route_history: List[Dict[str, Any]],
+    current_route: Optional[List[str]] = None,
+    normal_route: Optional[List[str]] = None,
+    current_exit: Optional[str] = None,
+    normal_exit: Optional[str] = None,
+    reason: str = ""
+):
     """Renders Section 11: Route History Table."""
     st.markdown('<div class="section-header">Route Change Event History</div>', unsafe_allow_html=True)
     if route_history:
+        st.markdown(
+            f"<div style='font-size: 0.80rem; color: #C084FC; font-weight: 700; margin-bottom: 6px;'>"
+            f"🔄 {len(route_history)} ROUTE TRANSITION EVENT(S) RECORDED IN CURRENT SESSION</div>",
+            unsafe_allow_html=True
+        )
         rh_df = pd.DataFrame(route_history)
-        display_cols = [c for c in ["timestamp", "previous_route", "new_route", "reason", "previous_cost", "new_cost", "cost_difference"] if c in rh_df.columns]
+        display_cols = [
+            c for c in [
+                "timestamp", "previous_route", "new_route",
+                "reason", "previous_cost", "new_cost", "cost_difference"
+            ]
+            if c in rh_df.columns
+        ]
         st.dataframe(rh_df[display_cols] if display_cols else rh_df, hide_index=True, use_container_width=True)
     else:
-        st.caption("No route changes registered yet. System operating on optimal baseline path.")
+        curr_str = " &rarr; ".join(current_route) if current_route else ""
+        norm_str = " &rarr; ".join(normal_route) if normal_route else ""
+        if current_route and normal_route and current_route != normal_route:
+            st.markdown(f"""
+            <div class="cmd-card" style="border-left: 4px solid #A855F7; padding: 12px 16px;">
+                <div style="font-weight: 800; color: #C084FC; font-size: 0.85rem;">
+                    ℹ️ NO MID-SESSION ROUTE TRANSITIONS LOGGED YET (INITIALIZED ON DIVERTED EMERGENCY ROUTE)
+                </div>
+                <div style="font-size: 0.84rem; color: #E2E8F0; margin-top: 4px;">
+                    Active route is currently diverted to <code style="color: #00FF88;">{curr_str}</code> (Exit: <strong>{current_exit or 'EXIT_B'}</strong>)
+                    instead of baseline <code style="color: #94A3B8;">{norm_str}</code> (Exit: <strong>{normal_exit or 'EXIT_A'}</strong>) due to active corridor hazard.<br>
+                    <em>Note: Route Change Event History records frame-to-frame transitions when the chosen route changes during the session (e.g., switching between 01 NORMAL and 03 FIRE).</em>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            route_note = f" (<code>{curr_str}</code>)" if curr_str else ""
+            st.markdown(f"""
+            <div class="cmd-card" style="border-left: 4px solid #10B981; padding: 12px 16px;">
+                <div style="font-weight: 800; color: #34D399; font-size: 0.85rem;">
+                    ✅ NO ROUTE CHANGES REGISTERED &mdash; ROUTE UNCHANGED
+                </div>
+                <div style="font-size: 0.84rem; color: #CBD5E1; margin-top: 4px;">
+                    The selected evacuation route{route_note} has not changed in this session. Facility is operating on the unobstructed baseline egress path.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
 
 def render_emergency_alert(has_fire: bool, has_smoke: bool, hazard_score: float,
-                           crowd_density: float, active_edge: Tuple[str, str], current_exit: str):
-    """Renders Section 12: Emergency Alert Center with Hierarchy."""
+                           crowd_density: float, active_edge: Tuple[str, str], current_exit: str,
+                           alert_manager: Optional[Any] = None):
+    """Renders Section 12: Emergency Alert Center with Hierarchy and Incident Acknowledgement."""
     st.markdown('<div class="section-header">Emergency Alert Center</div>', unsafe_allow_html=True)
     edge_label = f"{active_edge[0]} &harr; {active_edge[1]}"
+
+    # Interactive Unacknowledged Incident Cards
+    if alert_manager is not None and hasattr(alert_manager, "active_alerts"):
+        unacked = [a for a in alert_manager.active_alerts if not a.get("acknowledged", False)]
+        if unacked:
+            st.markdown(f"<div style='color: #EF4444; font-weight: 800; font-size: 0.9rem; margin-bottom: 8px;'>🚨 {len(unacked)} UNACKNOWLEDGED ACTIVE EMERGENCY ALERT(S) REQUIRE COMMAND ACTION:</div>", unsafe_allow_html=True)
+            for alt in unacked:
+                alt_id = alt.get("alert_id", "UNKNOWN")
+                with st.container():
+                    a_c1, a_c2 = st.columns([3, 1])
+                    with a_c1:
+                        st.markdown(f"""
+                        <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid #EF4444; border-radius: 6px; padding: 10px 14px; margin-bottom: 8px;">
+                            <div style="font-weight: 800; color: #FF4D6D;">[{alt_id}] {alt.get('type')} &mdash; {alt.get('location')}</div>
+                            <div style="font-size: 0.85rem; color: #F8FAFC;">Action: <strong>{alt.get('action')}</strong> &bull; Score: <strong>{alt.get('hazard_score')}</strong></div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        if alt.get("snapshot_path") and Path(alt["snapshot_path"]).exists():
+                            with st.expander(f"📸 View Hazard Snapshot ({alt_id})", expanded=False):
+                                st.image(alt["snapshot_path"], caption=f"Captured Frame: {alt_id}", use_container_width=True)
+                    with a_c2:
+                        if st.button(f"✅ Acknowledge", key=f"ack_btn_{alt_id}", use_container_width=True):
+                            alert_manager.acknowledge_alert(alt_id, operator_name="Command Station Operator")
+                            st.success(f"Alert {alt_id} Acknowledged.")
+                            st.rerun()
+
     if has_fire or hazard_score >= 0.70:
         st.markdown(f"""
         <div style="background: linear-gradient(135deg, rgba(239, 68, 68, 0.25) 0%, rgba(18, 28, 48, 0.95) 100%); border-left: 5px solid #EF4444; border-radius: 8px; padding: 14px 18px; margin-bottom: 12px;">
@@ -1301,44 +1412,132 @@ def render_emergency_alert(has_fire: bool, has_smoke: bool, hazard_score: float,
         """, unsafe_allow_html=True)
 
 
-def render_security_guard_log(guard_logs: List[Dict[str, Any]]):
-    """Renders Section 13: Security Response Center / Guard Log."""
+def render_security_guard_log(guard_logs: List[Dict[str, Any]], alert_manager: Optional[Any] = None):
+    """Renders Section 13: Security Response Center / Guard Log with exports."""
     st.markdown('<div class="section-header">Security Response Center (Guard Notifications)</div>', unsafe_allow_html=True)
-    if guard_logs:
-        guard_df = pd.DataFrame(guard_logs)
-        display_cols = [c for c in ["timestamp", "location", "type", "hazard_score", "people", "density", "recommended_exit", "action", "status"] if c in guard_df.columns]
+
+    # Ensure guard_logs is synchronized with AlertManager if empty list was passed
+    effective_logs = list(guard_logs) if guard_logs else []
+    if not effective_logs and alert_manager is not None:
+        if hasattr(alert_manager, "get_guard_log"):
+            effective_logs = list(alert_manager.get_guard_log(limit=15))
+        if not effective_logs and getattr(alert_manager, "active_alerts", None):
+            effective_logs = list(alert_manager.active_alerts)
+
+    if effective_logs:
+        latest = effective_logs[0]
+        latest_status = latest.get("status", "ACTIVE")
+        latest_col = "#10B981" if latest.get("acknowledged") else "#EF4444"
+        st.markdown(f"""
+        <div class="cmd-card" style="border-left: 4px solid {latest_col}; padding: 10px 14px; margin-bottom: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
+                <span style="font-size: 0.80rem; font-weight: 800; color: #38BDF8;">
+                    🛡️ {len(effective_logs)} SECURITY GUARD DISPATCH NOTIFICATION(S) ACTIVE IN REGISTRY
+                </span>
+                <span style="font-size: 0.75rem; font-weight: 700; color: {latest_col};">
+                    LATEST STATUS: {latest_status}
+                </span>
+            </div>
+            <div style="font-size: 0.85rem; color: #F8FAFC; margin-top: 4px;">
+                <strong>Latest Dispatch [{latest.get('alert_id', 'ALT')}]:</strong> {latest.get('action', 'Monitor facility')}
+                &bull; Zone: <code>{latest.get('location', 'N/A')}</code>
+                &bull; Recommended Exit: <strong style="color: #00FF88;">{latest.get('recommended_exit', 'N/A')}</strong>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        guard_df = pd.DataFrame(effective_logs)
+        display_cols = [
+            c for c in [
+                "alert_id", "timestamp", "location", "type", "severity",
+                "hazard_score", "people", "density", "recommended_exit",
+                "action", "status", "acknowledged", "acknowledged_by"
+            ]
+            if c in guard_df.columns
+        ]
         st.dataframe(guard_df[display_cols] if display_cols else guard_df, hide_index=True, use_container_width=True)
     else:
-        st.caption("No guard dispatch alerts registered. Facility security status nominal.")
+        st.markdown("""
+        <div class="cmd-card" style="border-left: 4px solid #334155; padding: 12px 16px;">
+            <div style="font-weight: 800; color: #94A3B8; font-size: 0.85rem;">
+                🛡️ NO SECURITY GUARD NOTIFICATIONS LOGGED
+            </div>
+            <div style="font-size: 0.84rem; color: #CBD5E1; margin-top: 4px;">
+                No guard dispatch alerts have been generated in this session. Facility security status is nominal.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Export options
+    if alert_manager is not None:
+        st.markdown("<div style='margin-top: 10px;'></div>", unsafe_allow_html=True)
+        exp_c1, exp_c2, exp_c3 = st.columns(3)
+        with exp_c1:
+            st.download_button(
+                "📥 Export Incident Log (JSON)",
+                data=alert_manager.export_incidents_json(),
+                file_name="command_center_incidents.json",
+                mime="application/json",
+                use_container_width=True
+            )
+        with exp_c2:
+            st.download_button(
+                "📥 Export Guard Log (CSV)",
+                data=alert_manager.export_guard_log_csv(),
+                file_name="security_guard_log.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        with exp_c3:
+            st.download_button(
+                "📥 Export Audit Summary (TXT)",
+                data=alert_manager.export_summary_txt(),
+                file_name="incident_audit_summary.txt",
+                mime="text/plain",
+                use_container_width=True
+            )
 
 
 def render_simulated_led_signage(signage_dict: Dict[str, Dict[str, str]]):
     """Renders Section 14: Simulated Directional LED Signage."""
     st.markdown('<div class="section-header">Simulated Dynamic Digital LED Signage</div>', unsafe_allow_html=True)
     st.markdown("<div style='font-size: 0.75rem; color: #FBBF24; font-weight: 700; margin-bottom: 6px;'>SIMULATION ONLY &mdash; NO PHYSICAL LED HARDWARE CONNECTED</div>", unsafe_allow_html=True)
-    cols = st.columns(len(signage_dict) if signage_dict else 2)
-    for idx, (ex_id, data) in enumerate(signage_dict.items()):
+
+    effective_signage = signage_dict if (signage_dict and isinstance(signage_dict, dict)) else {
+        "EXIT_A": {"status": "UNKNOWN / VERIFY SAFETY"},
+        "EXIT_B": {"status": "UNKNOWN / VERIFY SAFETY"}
+    }
+
+    cols = st.columns(len(effective_signage))
+    for idx, (ex_id, data) in enumerate(effective_signage.items()):
         with cols[idx]:
-            status = data.get("status", "OPEN")
-            if "SAFE" in status:
-                st.markdown(f"""
-                <div class="led-board">
-                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
-                    <div class="led-sign-safe">🟢 {ex_id}: SAFE ROUTE</div>
-                </div>
-                """, unsafe_allow_html=True)
-            elif "CLOSED" in status or "AVOID" in status:
+            status = str(data.get("status", "UNKNOWN")).upper()
+            if "CLOSED" in status or "AVOID" in status:
                 st.markdown(f"""
                 <div class="led-board">
                     <div class="led-title">{ex_id} DIGITAL SIGN</div>
                     <div class="led-sign-avoid">⛔ {ex_id}: CLOSED / AVOID</div>
                 </div>
                 """, unsafe_allow_html=True)
+            elif "SAFE" in status:
+                st.markdown(f"""
+                <div class="led-board">
+                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
+                    <div class="led-sign-safe">🟢 {ex_id}: SAFE ROUTE</div>
+                </div>
+                """, unsafe_allow_html=True)
+            elif "UNKNOWN" in status:
+                st.markdown(f"""
+                <div class="led-board">
+                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
+                    <div class="led-sign-standby" style="color: #FBBF24; border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08);">⚠️ {ex_id}: ROUTE SAFETY UNKNOWN</div>
+                </div>
+                """, unsafe_allow_html=True)
             else:
                 st.markdown(f"""
                 <div class="led-board">
                     <div class="led-title">{ex_id} DIGITAL SIGN</div>
-                    <div class="led-sign-standby">⚪ {ex_id}: AVAILABLE</div>
+                    <div class="led-sign-standby">⚪ {ex_id}: STANDBY / AVAILABLE</div>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -1347,7 +1546,10 @@ def render_pa_announcement(message: str):
     """Renders Section 15: Public Address (PA) Voice Advisory Simulation."""
     st.markdown('<div class="section-header">Public Address (PA) Voice Advisory</div>', unsafe_allow_html=True)
     st.markdown("<div style='font-size: 0.75rem; color: #38BDF8; font-weight: 700; margin-bottom: 6px;'>🔊 SIMULATED PUBLIC ADDRESS ADVISORY</div>", unsafe_allow_html=True)
-    st.markdown(f'<div class="pa-box">📢 &ldquo;{message}&rdquo;</div>', unsafe_allow_html=True)
+    msg_text = message if message else "Facility conditions nominal. Follow standard exit signs if required."
+    is_emer_pa = ("ATTENTION OCCUPANTS" in msg_text.upper() or "EMERGENCY" in msg_text.upper() or "🚨" in msg_text or "⚠️" in msg_text)
+    border_style = "border-left: 4px solid #EF4444; background: linear-gradient(135deg, rgba(239, 68, 68, 0.14) 0%, #0D1626 100%);" if is_emer_pa else ""
+    st.markdown(f'<div class="pa-box" style="{border_style}">📢 &ldquo;{msg_text}&rdquo;</div>', unsafe_allow_html=True)
 
 
 def render_performance_telemetry(latency_info: Dict[str, Any], frame_skip_val: int):

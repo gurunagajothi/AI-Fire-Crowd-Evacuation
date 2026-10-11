@@ -49,6 +49,7 @@ from integration.multi_camera_sim import MultiCameraSimulator
 from integration.decision_assistant import EmergencyDecisionAssistant
 from graph.multi_floor_graph import MultiFloorBuildingGraph
 from video.video_stream import VideoStreamHandler
+from integration.hazard_trend import TemporalHazardTracker
 from dashboard.styles import get_custom_css
 try:
     from dashboard.components import (
@@ -155,7 +156,7 @@ st.markdown(get_custom_css(), unsafe_allow_html=True)
 # CACHED SYSTEM INSTANCES (CPU INFERENCE)
 # -----------------------------------------------------------------------------
 @st.cache_resource(show_spinner="Loading Pretrained YOLO Models & Evacuation Engine (CPU)...")
-def get_system():
+def get_system(_schema_version: str = "v3_unified_emergency_state"):
     try:
         sys_inst = EvacuationSystem()
         return sys_inst, None
@@ -202,6 +203,12 @@ def get_available_test_videos() -> List[str]:
 def main():
     # Load Core Engines
     system, init_err = get_system()
+    if system is not None and (
+        not hasattr(system, "build_facility_emergency_state")
+        or not hasattr(system.alert_manager, "sync_facility_emergency_state")
+    ):
+        st.cache_resource.clear()
+        system, init_err = get_system()
     if init_err:
         st.error(f"[!] System Engine Initialization Failed: {init_err}")
         return
@@ -212,12 +219,20 @@ def main():
     # -------------------------------------------------------------------------
     # SESSION STATE INITIALIZATION
     # -------------------------------------------------------------------------
+    # SESSION STATE INITIALIZATION
+    # -------------------------------------------------------------------------
     if "camera_simulator" not in st.session_state:
         st.session_state.camera_simulator = MultiCameraSimulator()
+    if "hazard_tracker" not in st.session_state:
+        st.session_state.hazard_tracker = TemporalHazardTracker()
+    if "video_stream" not in st.session_state:
+        st.session_state.video_stream = None
+    if "monitoring_active" not in st.session_state:
+        st.session_state.monitoring_active = False
     if "active_sample_file" not in st.session_state:
         st.session_state.active_sample_file = "flames_sample.jpg"
     if "input_method" not in st.session_state:
-        st.session_state.input_method = "Quick Test: FIRE"
+        st.session_state.input_method = "Quick Test Sample"
     if "run_benchmark_active" not in st.session_state:
         st.session_state.run_benchmark_active = False
     if "telemetry_history" not in st.session_state:
@@ -246,14 +261,91 @@ def main():
     # Ingestion Source
     st.sidebar.markdown("---")
     st.sidebar.subheader("📹 CCTV Feed Acquisition")
-    input_options = ["Quick Test Sample", "Upload Image", "Upload Video", "Webcam"]
+    input_options = [
+        "Quick Test Sample",
+        "CCTV Demo Video",
+        "Laptop Webcam",
+        "External USB Camera",
+        "Upload Video",
+        "RTSP Network Stream",
+        "Upload Image"
+    ]
     curr_idx = 0
-    if st.session_state.input_method in ["Upload Image", "Upload Video", "Webcam"]:
+    if st.session_state.input_method in input_options:
         curr_idx = input_options.index(st.session_state.input_method)
 
     selected_method = st.sidebar.radio("CCTV Media Source", options=input_options, index=curr_idx)
-    if selected_method != "Quick Test Sample":
-        st.session_state.input_method = selected_method
+    st.session_state.input_method = selected_method
+
+    # Extra parameters depending on source
+    usb_idx = 1
+    rtsp_url = "rtsp://127.0.0.1:8554/live"
+    up_vid_file = None
+    if selected_method == "External USB Camera":
+        usb_idx = st.sidebar.number_input("USB Camera Index", min_value=1, max_value=5, value=1)
+    elif selected_method == "RTSP Network Stream":
+        rtsp_url = st.sidebar.text_input("RTSP Stream URL", value="rtsp://127.0.0.1:8554/live", help="Format: rtsp://username:password@ip:port/stream")
+    elif selected_method == "Upload Video":
+        up_vid_file = st.sidebar.file_uploader("Upload Video File", type=["mp4", "avi", "mov", "mkv"])
+
+    # Live Stream Monitoring Controls
+    if selected_method in ["CCTV Demo Video", "Laptop Webcam", "External USB Camera", "Upload Video", "RTSP Network Stream"]:
+        st.sidebar.markdown("**Live Stream Monitoring Controls**")
+        mon_col1, mon_col2 = st.sidebar.columns(2)
+        with mon_col1:
+            if st.button("▶ START", use_container_width=True):
+                target_src = 0
+                if selected_method == "CCTV Demo Video":
+                    target_src = str(DATA_DIR / "test" / "demo_cctv_feed.mp4")
+                elif selected_method == "Laptop Webcam":
+                    target_src = 0
+                elif selected_method == "External USB Camera":
+                    target_src = int(usb_idx)
+                elif selected_method == "RTSP Network Stream":
+                    target_src = rtsp_url.strip()
+                elif selected_method == "Upload Video":
+                    if up_vid_file is not None:
+                        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                        tfile.write(up_vid_file.read())
+                        target_src = tfile.name
+                    else:
+                        target_src = str(DATA_DIR / "test" / "demo_cctv_feed.mp4")
+
+                # Release prior stream if active
+                if st.session_state.video_stream is not None:
+                    st.session_state.video_stream.release()
+
+                stream = VideoStreamHandler(source=target_src)
+                if stream.start_stream():
+                    st.session_state.video_stream = stream
+                    st.session_state.monitoring_active = True
+                    st.session_state.camera_simulator.bind_stream("CAM-01", stream)
+                    st.sidebar.success(f"Connected: {stream.source_type}")
+                    st.rerun()
+                else:
+                    st.session_state.monitoring_active = False
+                    st.sidebar.error(f"Connection Failed: {stream.error_message}")
+
+        with mon_col2:
+            if st.button("⏹ STOP", use_container_width=True):
+                if st.session_state.video_stream is not None:
+                    st.session_state.video_stream.release()
+                    st.session_state.video_stream = None
+                st.session_state.monitoring_active = False
+                st.session_state.camera_simulator.unbind_stream("CAM-01")
+                st.sidebar.info("Monitoring halted.")
+                st.rerun()
+
+        # Monitoring status badge in sidebar
+        if st.session_state.monitoring_active and st.session_state.video_stream is not None:
+            v_tel = st.session_state.video_stream.get_telemetry()
+            st.sidebar.markdown(f"""
+            <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10B981; border-radius: 6px; padding: 6px 10px; margin-top: 6px; font-size: 0.8rem; color: #34D399;">
+                🟢 <strong>RUNNING:</strong> {v_tel['source_type']}<br>
+                FPS: <strong>{v_tel['fps']}</strong> &bull; Res: <strong>{v_tel['resolution']}</strong><br>
+                Frames: <strong>{v_tel['frame_count']}</strong>
+            </div>
+            """, unsafe_allow_html=True)
 
     # Evacuation Origin Room
     st.sidebar.markdown("---")
@@ -331,9 +423,42 @@ def main():
     input_frame = None
     media_source_description = ""
     is_video_mode = False
-    video_capture_obj = None
 
-    if st.session_state.input_method.startswith("Quick Test"):
+    # 1. Active Live Stream Monitoring Path (Persistent Handle)
+    if st.session_state.monitoring_active and st.session_state.video_stream is not None:
+        is_video_mode = True
+        success, v_frame = st.session_state.video_stream.get_frame(loop_video=True)
+        if success and v_frame is not None:
+            input_frame = v_frame
+            v_tel = st.session_state.video_stream.get_telemetry()
+            media_source_description = (
+                f"🟢 Live Monitoring Active &bull; {v_tel['source_type']} &bull; "
+                f"Running FPS: {v_tel['fps']} &bull; Res: {v_tel['resolution']} &bull; Frame: #{v_tel['frame_count']}"
+            )
+        else:
+            # Stream disconnected or encountered error
+            st.session_state.monitoring_active = False
+            err_msg = st.session_state.video_stream.error_message or "Camera feed interrupted"
+            st.session_state.camera_simulator.update_camera_telemetry(
+                cam_id="CAM-01",
+                fire_detected=False,
+                smoke_detected=False,
+                hazard_score=0.0,
+                people_count=0,
+                crowd_density=0.0,
+                coverage="UNAVAILABLE",
+                occlusion="HIGH"
+            )
+            st.session_state.hazard_tracker.update(
+                hazard_score=0.0,
+                camera_status="UNAVAILABLE"
+            )
+            st.error(f"⚠️ Live camera disconnected / unavailable: {err_msg}")
+            st.warning("VideoStreamHandler released safely. Do NOT invent fake detections. Please check your camera device or RTSP endpoint and click '▶ START' to reconnect.")
+            return
+
+    # 2. Standby / Static Sample Path
+    elif selected_method.startswith("Quick Test"):
         sample_name = st.session_state.active_sample_file
         sample_path = DATA_DIR / "test" / sample_name
         if sample_path.exists():
@@ -342,7 +467,7 @@ def main():
         else:
             st.error(f"[!] Benchmark file `{sample_name}` not found in `{DATA_DIR / 'test'}`.")
 
-    elif st.session_state.input_method == "Upload Image":
+    elif selected_method == "Upload Image":
         up_img = st.sidebar.file_uploader("Upload Image File", type=["jpg", "jpeg", "png", "bmp"])
         if up_img is not None:
             try:
@@ -361,76 +486,29 @@ def main():
                 input_frame = cv2.imread(str(sample_path))
                 media_source_description = f"Awaiting Upload &bull; Displaying Sample: `{sample_path.name}`"
 
-    elif st.session_state.input_method == "Upload Video":
-        is_video_mode = True
-        up_vid = st.sidebar.file_uploader("Upload Video File", type=["mp4", "avi", "mov", "mkv"])
-        video_path = None
-        if up_vid is not None:
-            try:
-                tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-                tfile.write(up_vid.read())
-                video_path = tfile.name
-                media_source_description = f"Uploaded Video: `{up_vid.name}`"
-            except Exception as e:
-                st.warning(f"⚠️ Error reading video: {e}")
+    elif selected_method == "CCTV Demo Video":
+        sample_path = DATA_DIR / "test" / "demo_cctv_feed.mp4"
+        if sample_path.exists():
+            cap_prev = cv2.VideoCapture(str(sample_path))
+            ret_p, frame_p = cap_prev.read()
+            cap_prev.release()
+            if ret_p and frame_p is not None:
+                input_frame = frame_p
+                media_source_description = "CCTV Sample Preview (`demo_cctv_feed.mp4`) &bull; Click '▶ START' in sidebar to run live continuous loop."
+        if input_frame is None:
+            input_frame = cv2.imread(str(DATA_DIR / "test" / "normal_sample.jpg"))
+            media_source_description = "Awaiting Video Stream &bull; Click '▶ START' in sidebar."
 
-        if not video_path:
-            available_vids = get_available_test_videos()
-            if available_vids:
-                video_path = str(DATA_DIR / "test" / available_vids[0])
-                media_source_description = f"Awaiting Video Upload &bull; Using Demo Feed: `{available_vids[0]}`"
-
-        if video_path:
-            video_capture_obj = cv2.VideoCapture(video_path)
-            if video_capture_obj.isOpened():
-                ret, frame = video_capture_obj.read()
-                if ret and frame is not None:
-                    input_frame = frame
-            else:
-                input_frame = cv2.imread(str(DATA_DIR / "test" / "flames_sample.jpg"))
-
-    elif st.session_state.input_method == "Webcam":
-        webcam_idx = st.sidebar.number_input("Camera Index", min_value=0, max_value=5, value=0)
-        run_cam = st.sidebar.checkbox("Start Live Webcam Feed", value=False)
-        if run_cam:
-            try:
-                cap = cv2.VideoCapture(int(webcam_idx))
-                if cap.isOpened():
-                    ret, frame = cap.read()
-                    if ret and frame is not None:
-                        input_frame = frame
-                        media_source_description = f"Live CCTV Webcam Feed (Device #{webcam_idx})"
-                    else:
-                        input_frame = cv2.imread(str(DATA_DIR / "test" / "flames_sample.jpg"))
-                    cap.release()
-                else:
-                    st.sidebar.warning("⚠️ Webcam device unavailable. Using benchmark fallback.")
-                    input_frame = cv2.imread(str(DATA_DIR / "test" / "flames_sample.jpg"))
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ Webcam error: {e}. Using fallback.")
-                input_frame = cv2.imread(str(DATA_DIR / "test" / "flames_sample.jpg"))
-        else:
-            input_frame = cv2.imread(str(DATA_DIR / "test" / "flames_sample.jpg"))
-            media_source_description = "Webcam Inactive &bull; Displaying Benchmark Sample (flames_sample.jpg)"
+    else:
+        # Standby for Laptop Webcam, External USB Camera, Upload Video, RTSP Network Stream
+        sample_path = DATA_DIR / "test" / st.session_state.active_sample_file
+        if sample_path.exists():
+            input_frame = cv2.imread(str(sample_path))
+            media_source_description = f"Standby Mode ({selected_method}) &bull; Click '▶ START' in sidebar to activate real-time feed."
 
     if input_frame is None:
         st.error("⚠️ No valid surveillance frame available. Please select a Quick Test sample or upload an image.")
         return
-
-    # -------------------------------------------------------------------------
-    # BASELINE NORMAL ROUTE CALCULATION (DYNAMIC CLEAN GRAPH EVALUATION)
-    # -------------------------------------------------------------------------
-    clean_graph = system.building_graph.graph.copy()
-    for u_node, v_node in clean_graph.edges:
-        clean_graph[u_node][v_node]["hazard"] = 0.0
-        clean_graph[u_node][v_node]["density"] = 0.0
-    system.optimizer.update_all_edge_costs(clean_graph)
-    normal_route_info = system.optimizer.find_safest_route(
-        clean_graph, source=source_room, exits=["EXIT_A", "EXIT_B"]
-    )
-    normal_route = normal_route_info.get("path", [])
-    normal_exit = normal_route_info.get("selected_exit", "NONE")
-    normal_cost = normal_route_info.get("total_cost", 0.0)
 
     # -------------------------------------------------------------------------
     # PIPELINE EXECUTION (DUAL YOLOV8N CPU INFERENCE & DYNAMIC DIJKSTRA)
@@ -447,27 +525,40 @@ def main():
                 frame=input_frame,
                 active_edge=active_edge,
                 source_room=source_room,
-                enable_frame_skip=enable_frame_skip,
+                enable_frame_skip=(enable_frame_skip and is_video_mode),
                 skip_interval=frame_skip_val
             )
         except Exception as e:
             st.error(f"⚠️ Error executing pipeline on current frame: {e}")
             return
 
-    # Unpack live pipeline metrics
-    has_fire = result["fire_detected"]
-    has_smoke = result["smoke_detected"]
-    hazard_score = result["hazard_score"]
-    people_count = result["people_detected"]
-    crowd_density = result["crowd_density"]
-    current_exit = result["recommended_exit"]
-    current_route = result["recommended_route"]
-    current_route_str = result["recommended_route_str"]
-    current_cost = result["total_route_cost"]
+    # Unpack unified facility emergency state (Single Source of Truth)
+    emergency_state = result["emergency_state"]
+    has_fire = emergency_state["fire_detected"]
+    has_smoke = emergency_state["smoke_detected"]
+    hazard_score = emergency_state["hazard_score"]
+    people_count = emergency_state["people_count"]
+    crowd_density = emergency_state["crowd_density"]
+    current_exit = emergency_state["recommended_exit"]
+    current_route = emergency_state["recommended_route"]
+    current_route_str = emergency_state["recommended_route_str"]
+    current_cost = emergency_state["total_route_cost"]
+    normal_route = emergency_state["baseline_route"]
+    normal_exit = emergency_state["baseline_exit"]
+    normal_cost = emergency_state["baseline_cost"]
+    hazard_status = emergency_state["status_level"]
+    hazard_type_str = emergency_state["hazard_type"]
+    crowd_status = emergency_state["crowd_status"]
+    zone_status_label = emergency_state["zone_status"]
+    route_changed = emergency_state["is_diverted_from_baseline"]
+    avoided_exit = emergency_state["avoided_exit"]
+    cost_delta = emergency_state["cost_delta_vs_baseline"]
+    adaptation_reason = emergency_state["adaptation_reason"]
+    signage_dict = emergency_state["dynamic_signage"]
+    pa_announcement = emergency_state["pa_announcement"]
+
     annotated_frame = result["annotated_frame"]
     latency_info = result.get("latency_metrics", {})
-    signage_dict = result.get("dynamic_signage", {})
-    pa_announcement = result.get("current_pa_message", "")
     zone_counts = result.get("multi_zone_counts", {})
     zone_densities = result.get("multi_zone_densities", {})
 
@@ -476,44 +567,6 @@ def main():
     edge_len = graph[active_edge[0]][active_edge[1]]["length"]
     updated_edge_cost = graph[active_edge[0]][active_edge[1]]["cost"]
     baseline_edge_cost = GAMMA * edge_len
-
-    # Derive hazard and crowd status labels
-    if hazard_score >= 0.70 or has_fire:
-        hazard_status = "CRITICAL"
-        hazard_type_str = "FIRE"
-    elif hazard_score >= 0.40 or has_smoke:
-        hazard_status = "WARNING"
-        hazard_type_str = "SMOKE"
-    elif hazard_score > 0.0:
-        hazard_status = "CAUTION"
-        hazard_type_str = "LOW HAZARD"
-    else:
-        hazard_status = "NORMAL"
-        hazard_type_str = "NONE"
-
-    if crowd_density >= 0.70:
-        crowd_status = "HIGH CONGESTION"
-    elif crowd_density >= 0.35:
-        crowd_status = "MODERATE"
-    else:
-        crowd_status = "NORMAL"
-
-    zone_status_label = "CRITICAL" if hazard_status in ["CRITICAL", "WARNING"] or crowd_status == "HIGH CONGESTION" else ("CAUTION" if hazard_status == "CAUTION" or crowd_status == "MODERATE" else "NORMAL")
-
-    # Evaluate dynamic route change status
-    route_changed = (current_route != normal_route)
-    cost_delta = current_cost - normal_cost
-    if route_changed:
-        if has_fire or hazard_score >= 0.70:
-            adaptation_reason = f"Corridor edge {active_edge[0]} <-> {active_edge[1]} compromised by Fire Hazard ({hazard_score:.3f}). Edge cost increased from {baseline_edge_cost:.2f} to {updated_edge_cost:.2f}. Dynamic Dijkstra rerouted origin {source_room} from {normal_exit} to {current_exit}."
-        elif has_smoke or hazard_score > 0.0:
-            adaptation_reason = f"Corridor edge {active_edge[0]} <-> {active_edge[1]} compromised by Smoke Hazard ({hazard_score:.3f}). Air quality and visibility impaired. Rerouted from {normal_exit} to {current_exit}."
-        elif crowd_density >= 0.70:
-            adaptation_reason = f"Severe occupant congestion on {active_edge[0]} <-> {active_edge[1]} (Density: {crowd_density:.3f}). Dynamic Dijkstra diverted path from {normal_exit} to {current_exit} to prevent crowd crush."
-        else:
-            adaptation_reason = f"Dynamic path cost adjustments made alternate route via {current_exit} globally optimal."
-    else:
-        adaptation_reason = f"Direct egress route to {normal_exit} remains unobstructed and optimal (Total Cost: {current_cost:.2f}). No detour required."
 
     # Update Multi-Camera Simulator Telemetry for CAM-01 (Primary Active Camera)
     st.session_state.camera_simulator.update_camera_telemetry(
@@ -525,6 +578,20 @@ def main():
         crowd_density=crowd_density,
         latency_ms=latency_info.get("total_ms", 0.0),
         sample_file=st.session_state.active_sample_file
+    )
+
+    # Update Temporal Hazard Tracker
+    f_conf = max([d["confidence"] for d in result.get("fire_detections", []) if d.get("class_name") == "fire"] or [0.0])
+    s_conf = max([d["confidence"] for d in result.get("fire_detections", []) if d.get("class_name") == "smoke"] or [0.0])
+    st.session_state.hazard_tracker.update(
+        hazard_score=hazard_score,
+        fire_conf=f_conf,
+        smoke_conf=s_conf,
+        people_count=people_count,
+        crowd_density=crowd_density,
+        camera_id="CAM-01",
+        zone=f"{active_edge[0]} <-> {active_edge[1]}",
+        camera_status="ONLINE"
     )
 
     # Calculate Evacuation Risk Index & Efficiency Index
@@ -682,13 +749,14 @@ def main():
                 hazard_score=hazard_score,
                 crowd_density=crowd_density,
                 active_edge=active_edge,
-                current_exit=current_exit
+                current_exit=current_exit,
+                alert_manager=system.alert_manager
             )
             render_recommended_exit_panel(
                 recommended_exit=current_exit,
                 total_route_cost=current_cost,
                 route_distance=route_dist,
-                avoided_exit=normal_exit if route_changed else None
+                avoided_exit=avoided_exit
             )
             render_route_flow_card(
                 route_nodes=current_route,
@@ -698,8 +766,8 @@ def main():
         with em_col2:
             render_simulated_led_signage(signage_dict=signage_dict)
             render_pa_announcement(message=pa_announcement)
-            guard_logs = system.alert_manager.get_guard_log(limit=5)
-            render_security_guard_log(guard_logs=guard_logs)
+            guard_logs = result.get("security_guard_log") or system.alert_manager.get_guard_log(limit=10)
+            render_security_guard_log(guard_logs=guard_logs, alert_manager=system.alert_manager)
 
         st.markdown("---")
         annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
@@ -857,7 +925,7 @@ def main():
             recommended_exit=current_exit,
             total_route_cost=current_cost,
             route_distance=route_dist,
-            avoided_exit=normal_exit if route_changed else None
+            avoided_exit=avoided_exit
         )
         render_route_flow_card(
             route_nodes=current_route,
@@ -895,7 +963,8 @@ def main():
             hazard_score=hazard_score,
             crowd_density=crowd_density,
             active_edge=active_edge,
-            current_exit=current_exit
+            current_exit=current_exit,
+            alert_manager=system.alert_manager
         )
         al_c1, al_c2 = st.columns(2)
         with al_c1:
@@ -903,17 +972,24 @@ def main():
         with al_c2:
             render_pa_announcement(message=pa_announcement)
 
-        guard_logs = system.alert_manager.get_guard_log(limit=10)
-        render_security_guard_log(guard_logs=guard_logs)
-        route_history_list = system.alert_manager.get_route_history(limit=10)
-        render_route_history_table(route_history=route_history_list)
+        guard_logs = result.get("security_guard_log") or system.alert_manager.get_guard_log(limit=10)
+        render_security_guard_log(guard_logs=guard_logs, alert_manager=system.alert_manager)
+        route_history_list = result.get("route_history") or system.alert_manager.get_route_history(limit=10)
+        render_route_history_table(
+            route_history=route_history_list,
+            current_route=current_route,
+            normal_route=normal_route,
+            current_exit=current_exit,
+            normal_exit=normal_exit,
+            reason=adaptation_reason
+        )
 
     # TAB 6: ANALYTICS & TELEMETRY
     with tabs[5]:
         st.markdown('<div class="section-header">Real-Time Performance Analytics &amp; Hardware Telemetry</div>', unsafe_allow_html=True)
         render_performance_telemetry(latency_info=latency_info, frame_skip_val=frame_skip_val)
         render_system_health_monitor(latency_info=latency_info, fps=latency_info.get("fps", 0.0), frame_skip=frame_skip_val)
-        render_temporal_trend_panel(history=st.session_state.telemetry_history)
+        render_temporal_trend_panel(history=st.session_state.telemetry_history, tracker=st.session_state.hazard_tracker)
 
         if st.session_state.telemetry_history and len(st.session_state.telemetry_history) > 1:
             df_hist = pd.DataFrame(st.session_state.telemetry_history)
@@ -1063,9 +1139,10 @@ def main():
         - **Vulnerable Priority**: `{vulnerable_priority}`
         """)
 
-    # Release any active video capture
-    if video_capture_obj is not None:
-        video_capture_obj.release()
+    # Live continuous monitoring loop auto-refresh
+    if st.session_state.monitoring_active and st.session_state.video_stream is not None:
+        time.sleep(0.04)
+        st.rerun()
 
 
 if __name__ == "__main__":

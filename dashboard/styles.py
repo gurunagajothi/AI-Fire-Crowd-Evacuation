@@ -30,9 +30,30 @@ def get_custom_css() -> str:
             --text-muted: #64748B;
         }
 
-        html, body, [class*="css"], [class*="st-"] {
+        html, body, .stApp {
             font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
             color: var(--text-primary);
+        }
+
+        /* Preserve Streamlit Material Symbols font so built-in icons
+           (keyboard_double_arrow_left, keyboard_double_arrow_right, expander chevrons)
+           never render as raw ligature text */
+        [data-testid="stIconMaterial"],
+        span[data-testid="stIconMaterial"],
+        .material-symbols-rounded {
+            font-family: "Material Symbols Rounded" !important;
+            font-weight: normal !important;
+            font-style: normal !important;
+            line-height: 1 !important;
+            letter-spacing: normal !important;
+            text-transform: none !important;
+            display: inline-block !important;
+            white-space: nowrap !important;
+            word-wrap: normal !important;
+            direction: ltr !important;
+            font-feature-settings: "liga" !important;
+            -webkit-font-feature-settings: "liga" !important;
+            -webkit-font-smoothing: antialiased !important;
         }
 
         .stApp {

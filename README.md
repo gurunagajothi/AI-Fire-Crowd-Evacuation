@@ -210,15 +210,79 @@ The application incorporates a multi-mode command center designed for academic r
 
 ## 12. Complete Test Suite Execution
 
+All 4 test suites execute cleanly on CPU with Python 3.13:
+
 ```bash
-# 1. Run Advanced Features Test Suite (10 Tests)
+# 1. Run Real-Time Pipeline & Temporal Tracking Test Suite (12 Tests)
+python tests/test_realtime_pipeline.py
+
+# 2. Run Advanced Features Test Suite (10 Tests)
 python tests/test_advanced_features.py
 
-# 2. Run Functional Test Suite (14 Tests)
+# 3. Run Functional Test Suite (14 Tests)
 python tests/test_full_system.py
 
-# 3. Run Complete End-to-End Test Suite (12 Steps)
+# 4. Run Complete End-to-End Test Suite (12 Steps)
 python tests/test_end_to_end.py
 ```
+
+**Total Verified Tests: 48 / 48 PASSED (100% Pass Rate)**
+
+---
+
+## 13. Real-Time CCTV Ingestion & Hardware Setup Guide
+
+The command center supports physical hardware, network RTSP streams, and recorded video:
+
+### 1. Laptop Webcam
+- Select `Laptop Webcam` in the sidebar CCTV Media Source.
+- Click `▶ START` to activate real-time camera ingestion.
+- The system automatically captures live frames at native resolution with running FPS calculation.
+
+### 2. External USB Camera
+- Connect your USB camera (e.g., Logitech C920 / external USB lens).
+- Select `External USB Camera` and specify the camera index (typically `1` or `2`).
+- Click `▶ START` to bind the physical feed to `CAM-01`.
+
+### 3. Configurable RTSP Network Stream
+- Select `RTSP Network Stream`.
+- Enter the RTSP endpoint (e.g., `rtsp://admin:password@192.168.1.100:554/h264Preview_01_main`).
+- OpenCV FFmpeg parameters are configured with non-blocking timeouts to prevent hanging on network disruptions.
+- Click `▶ START` to engage live IP camera surveillance.
+
+### 4. CCTV Sample Video
+- Select `CCTV Demo Video` to loop `data/test/demo_cctv_feed.mp4` continuously for offline academic demonstrations.
+
+### 5. Graceful Disconnection Handling
+- If a camera disconnects or network stream drops, the system transitions to `CAMERA UNAVAILABLE` with honest error telemetry.
+- **Zero Hallucination / Zero Fake Fallbacks**: The system never substitutes a synthetic fire image to fake camera activity.
+
+---
+
+## 14. Temporal Hazard Tracking & Flap Prevention
+
+Located in [`integration/hazard_trend.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/integration/hazard_trend.py):
+- **Rolling Window Analysis**: Retains the last 30 frames of perception telemetry.
+- **Linear Trend Slope**: Computes instantaneous slope to categorize hazard direction (`RISING ↗`, `STABLE →`, `FALLING ↘`).
+- **Consecutive-Frame Confirmation**: Requires 3 consecutive hazardous frames before escalating to confirmed alarms, eliminating false positives from single-frame optical anomalies.
+- **Cooldown Flap Prevention**: Implements a 10-frame vigilance cooldown upon hazard abatement, keeping the system in `MONITORING` state to prevent directional signage flapping.
+- **State Hierarchy**:
+  - `NORMAL` (Nominal conditions)
+  - `MONITORING` (Cooldown state active)
+  - `RISK INCREASING` (Early unconfirmed hazard)
+  - `SMOKE DETECTED` (Confirmed smoke plume)
+  - `FIRE DETECTED` (Confirmed flame presence)
+  - `CAMERA UNAVAILABLE` (Stream disruption)
+
+---
+
+## 15. Smart Emergency Incident Management
+
+Located in [`alerts/alert_manager.py`](file:///C:/Users/GURU%20NAGAJOTHI/Desktop/AI_Fire_Crowd_Evacuation/alerts/alert_manager.py):
+- **Incident Acknowledgement**: Operators can acknowledge active alarms via the dashboard with automatic logging of the operator name and timestamp.
+- **Automatic Frame Snapshots**: Captured frames are automatically saved to `data/processed/snapshots/` with unique incident IDs upon critical hazard detection.
+- **Duplicate Suppression**: Suppresses repeated alarm spam within a 15-second cooldown while refreshing telemetry.
+- **External Notifications**: Non-blocking dispatch via Telegram Bot API or SMTP Email using environment variables (`TELEGRAM_BOT_TOKEN`, `SMTP_SERVER`).
+- **Incident Exports**: Instant one-click exports of audit trails in `JSON`, `CSV`, and `TXT` formats.
 
 

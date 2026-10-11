@@ -84,6 +84,11 @@ class EvacuationSystem:
         # Route state memory for continuous route change detection
         self.last_routes: Dict[str, List[str]] = {}
         self.last_costs: Dict[str, float] = {}
+        self._last_active_edge: Optional[Tuple[str, str]] = None
+        self._last_cache_signature: Optional[Tuple[Any, ...]] = None
+
+        # Unified facility emergency state for the current frame/session
+        self.current_emergency_state: Optional[Dict[str, Any]] = None
 
         # Last perception cache for skipped frames in continuous video
         self.cached_result: Optional[Dict[str, Any]] = None
@@ -129,6 +134,164 @@ class EvacuationSystem:
 
         return zone_counts
 
+    def build_facility_emergency_state(
+        self,
+        graph: Any,
+        source_room: str,
+        active_edge: Tuple[str, str],
+        all_exits: List[str],
+        has_fire: bool,
+        has_smoke: bool,
+        hazard_score: float,
+        people_count: int,
+        crowd_density: float,
+        rec_route: List[str],
+        rec_exit: str,
+        total_route_cost: float,
+        route_changed_this_frame: bool,
+        previous_route: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        Constructs a single, authoritative facility emergency state dictionary
+        for the current frame/session so all UI panels, signage, PA advisories,
+        route history, and guard notifications derive from one consistent state.
+        """
+        u, v = active_edge
+
+        # 1. Clean baseline route evaluation (zero hazard, zero crowd density)
+        clean_graph = graph.copy()
+        for u_n, v_n in clean_graph.edges:
+            clean_graph[u_n][v_n]["hazard"] = 0.0
+            clean_graph[u_n][v_n]["density"] = 0.0
+        self.optimizer.update_all_edge_costs(clean_graph)
+        baseline_info = self.optimizer.find_safest_route(
+            clean_graph, source=source_room, exits=all_exits
+        )
+        baseline_route = baseline_info.get("path", [])
+        baseline_exit = baseline_info.get("selected_exit", "NONE")
+        baseline_cost = baseline_info.get("total_cost", 0.0)
+
+        # 2. Unified hazard & crowd status classification
+        if has_fire or hazard_score >= 0.70:
+            hazard_status = "CRITICAL"
+            hazard_type = "FIRE"
+        elif has_smoke or hazard_score >= 0.40:
+            hazard_status = "WARNING"
+            hazard_type = "SMOKE"
+        elif hazard_score > 0.0:
+            hazard_status = "CAUTION"
+            hazard_type = "LOW HAZARD"
+        elif crowd_density >= 0.70:
+            hazard_status = "WARNING"
+            hazard_type = "CROWD_CONGESTION"
+        else:
+            hazard_status = "NORMAL"
+            hazard_type = "NONE"
+
+        if crowd_density >= 0.70:
+            crowd_status = "HIGH CONGESTION"
+        elif crowd_density >= 0.35:
+            crowd_status = "MODERATE"
+        else:
+            crowd_status = "NORMAL"
+
+        is_emergency = bool(has_fire or has_smoke or hazard_score > 0.0 or crowd_density >= 0.70)
+        zone_status = (
+            "CRITICAL"
+            if (hazard_status in ["CRITICAL", "WARNING"] or crowd_status == "HIGH CONGESTION")
+            else ("CAUTION" if (hazard_status == "CAUTION" or crowd_status == "MODERATE") else "NORMAL")
+        )
+
+        # 3. Dynamically identify compromised exits from graph edge state & route diversion
+        compromised_exits: List[str] = []
+        for ex in all_exits:
+            if ex in graph.nodes:
+                for nbr in graph.neighbors(ex):
+                    edge_data = graph[nbr][ex]
+                    if edge_data.get("hazard", 0.0) > 0.0 or edge_data.get("density", 0.0) >= 0.70:
+                        if ex not in compromised_exits:
+                            compromised_exits.append(ex)
+
+        is_diverted_from_baseline = (rec_route != baseline_route)
+        if is_emergency and baseline_exit not in ("", "NONE", "UNKNOWN", rec_exit):
+            if baseline_exit not in compromised_exits:
+                compromised_exits.append(baseline_exit)
+
+        avoided_exit = (
+            compromised_exits[0]
+            if compromised_exits
+            else (baseline_exit if (is_diverted_from_baseline and baseline_exit != rec_exit) else None)
+        )
+
+        # 4. Compute causal adaptation reason
+        edge_len = graph[u][v]["length"]
+        updated_edge_cost = graph[u][v]["cost"]
+        baseline_edge_cost = self.optimizer.gamma * edge_len
+
+        if is_diverted_from_baseline:
+            if has_fire or hazard_score >= 0.70:
+                adaptation_reason = (
+                    f"Corridor edge {u} <-> {v} compromised by Fire Hazard ({hazard_score:.3f}). "
+                    f"Edge cost increased from {baseline_edge_cost:.2f} to {updated_edge_cost:.2f}. "
+                    f"Dynamic Dijkstra rerouted origin {source_room} from {baseline_exit} to {rec_exit}."
+                )
+            elif has_smoke or hazard_score > 0.0:
+                adaptation_reason = (
+                    f"Corridor edge {u} <-> {v} compromised by Smoke Hazard ({hazard_score:.3f}). "
+                    f"Air quality and visibility impaired. Rerouted from {baseline_exit} to {rec_exit}."
+                )
+            elif crowd_density >= 0.70:
+                adaptation_reason = (
+                    f"Severe occupant congestion on {u} <-> {v} (Density: {crowd_density:.3f}). "
+                    f"Dynamic Dijkstra diverted path from {baseline_exit} to {rec_exit} to prevent crowd crush."
+                )
+            else:
+                adaptation_reason = (
+                    f"Dynamic path cost adjustments made alternate route via {rec_exit} globally optimal."
+                )
+        else:
+            if is_emergency:
+                adaptation_reason = (
+                    f"Hazard/congestion active on {u} <-> {v} (Score: {hazard_score:.3f}), "
+                    f"and route via {rec_exit} remains the lowest-cost safe egress path (Total Cost: {total_route_cost:.2f})."
+                )
+            else:
+                adaptation_reason = (
+                    f"Direct egress route to {baseline_exit} remains unobstructed and optimal "
+                    f"(Total Cost: {total_route_cost:.2f}). No detour required."
+                )
+
+        return {
+            "is_emergency": is_emergency,
+            "status_level": hazard_status,
+            "hazard_type": hazard_type,
+            "crowd_status": crowd_status,
+            "zone_status": zone_status,
+            "active_edge": active_edge,
+            "active_zone_str": f"{u} <-> {v}",
+            "source_room": source_room,
+            "fire_detected": has_fire,
+            "smoke_detected": has_smoke,
+            "hazard_score": round(hazard_score, 3),
+            "people_count": people_count,
+            "crowd_density": round(crowd_density, 3),
+            "baseline_route": baseline_route,
+            "baseline_route_str": " -> ".join(baseline_route) if baseline_route else "NONE",
+            "baseline_exit": baseline_exit,
+            "baseline_cost": round(baseline_cost, 2),
+            "recommended_route": rec_route,
+            "recommended_route_str": " -> ".join(rec_route) if rec_route else "NO SAFE ROUTE",
+            "recommended_exit": rec_exit,
+            "total_route_cost": round(total_route_cost, 2),
+            "cost_delta_vs_baseline": round(total_route_cost - baseline_cost, 2),
+            "compromised_exits": compromised_exits,
+            "avoided_exit": avoided_exit,
+            "is_diverted_from_baseline": is_diverted_from_baseline,
+            "route_changed_this_frame": route_changed_this_frame,
+            "previous_route": previous_route,
+            "adaptation_reason": adaptation_reason,
+        }
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -144,7 +307,7 @@ class EvacuationSystem:
         3. Multi-zone crowd density and hazard mapping.
         4. Dynamic edge cost update.
         5. Continuous Dynamic Dijkstra execution & Route-Change Event detection.
-        6. Alert Manager & Dynamic Directional Signage dispatch.
+        6. Unified Facility Emergency State construction, Alert Manager & Signage dispatch.
         7. OpenCV HUD overlay rendering.
         """
         # Validate frame
@@ -154,17 +317,41 @@ class EvacuationSystem:
         self.frame_counter += 1
         t_start_total = time.time()
 
-        # Handle frame skipping in continuous video stream mode
-        if enable_frame_skip and (self.frame_counter % skip_interval != 0) and self.cached_result is not None:
+        h, w = frame.shape[:2]
+        cache_sig = (
+            active_edge,
+            source_room,
+            frame.shape,
+            int(frame[0, 0, 0]),
+            int(frame[h // 2, w // 2, 0]),
+            int(frame[-1, -1, 0])
+        )
+
+        # Handle frame skipping in continuous video stream mode ONLY when configuration & frame match
+        if (
+            enable_frame_skip
+            and (self.frame_counter % skip_interval != 0)
+            and self.cached_result is not None
+            and self._last_cache_signature == cache_sig
+        ):
             self.skipped_frames_counter += 1
-            # Return cached result with updated frame overlay
             cached = self.cached_result.copy()
             cached["frames_processed"] = self.processed_frames_counter
             cached["frames_skipped"] = self.skipped_frames_counter
+            cached["dynamic_signage"] = self.alert_manager.dynamic_signage
+            cached["current_pa_message"] = self.alert_manager.current_pa_message
+            cached["security_guard_log"] = self.alert_manager.get_guard_log()
+            cached["route_history"] = self.alert_manager.get_route_history()
+            if "latency_metrics" in cached and isinstance(cached["latency_metrics"], dict):
+                lat_copy = cached["latency_metrics"].copy()
+                lat_copy["frame_number"] = self.frame_counter
+                lat_copy["frames_processed"] = self.processed_frames_counter
+                lat_copy["frames_skipped"] = self.skipped_frames_counter
+                cached["latency_metrics"] = lat_copy
             return cached
 
         self.processed_frames_counter += 1
-        h, w = frame.shape[:2]
+        self._last_cache_signature = cache_sig
         graph = self.building_graph.get_graph()
         u, v = active_edge
 
@@ -211,6 +398,14 @@ class EvacuationSystem:
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             }
 
+        # Reset previously monitored edge if active_edge changed
+        if self._last_active_edge is not None and self._last_active_edge != active_edge:
+            prev_u, prev_v = self._last_active_edge
+            if graph.has_edge(prev_u, prev_v):
+                self.building_graph.update_edge_hazard(prev_u, prev_v, 0.0)
+                self.building_graph.update_edge_density(prev_u, prev_v, 0.0)
+        self._last_active_edge = active_edge
+
         # Update primary monitored edge
         self.building_graph.update_edge_hazard(u, v, hazard_score)
         self.building_graph.update_edge_density(u, v, crowd_density)
@@ -237,7 +432,7 @@ class EvacuationSystem:
         rec_route_str = " -> ".join(rec_route) if rec_route else "NO SAFE ROUTE"
         total_route_cost = route_info.get("total_cost", 0.0)
 
-        # Route Change Detection
+        # Route Change Detection (recorded ONLY when chosen route genuinely changes from previous route)
         previous_route = self.last_routes.get(source_room, None)
         previous_cost = self.last_costs.get(source_room, total_route_cost)
         route_changed = False
@@ -246,12 +441,14 @@ class EvacuationSystem:
         if previous_route is not None and previous_route != rec_route:
             route_changed = True
             # Determine causal trigger
-            if hazard_score > 0.0:
-                reason = f"Hazard increased on {u} <-> {v} (Score: {hazard_score:.2f})"
+            if has_fire or hazard_score >= 0.70:
+                reason = f"Fire hazard confirmed on {u} <-> {v} (Score: {hazard_score:.2f}); rerouted to {rec_exit}"
+            elif hazard_score > 0.0:
+                reason = f"Hazard increased on {u} <-> {v} (Score: {hazard_score:.2f}); rerouted to {rec_exit}"
             elif crowd_density > 0.40:
-                reason = f"Crowd density increased on {u} <-> {v} (Density: {crowd_density:.2f})"
+                reason = f"Crowd density increased on {u} <-> {v} (Density: {crowd_density:.2f}); rerouted to {rec_exit}"
             else:
-                reason = "Dynamic path cost optimization"
+                reason = f"Hazard cleared on {u} <-> {v}; restored optimal route via {rec_exit}"
 
             route_change_event = self.alert_manager.register_route_change(
                 previous_route=previous_route,
@@ -263,26 +460,64 @@ class EvacuationSystem:
                 hazard_score=hazard_score,
                 crowd_density=crowd_density
             )
-        elif previous_route is None:
-            # First initialization
-            self.alert_manager.update_dynamic_signage(recommended_exit=rec_exit)
 
         # Update route memory
         self.last_routes[source_room] = rec_route
         self.last_costs[source_room] = total_route_cost
 
-        # Trigger zone alert if active fire/smoke
+        # --- STEP 5B: BUILD & SYNCHRONIZE UNIFIED FACILITY EMERGENCY STATE ---
+        emergency_state = self.build_facility_emergency_state(
+            graph=graph,
+            source_room=source_room,
+            active_edge=active_edge,
+            all_exits=all_exits,
+            has_fire=has_fire,
+            has_smoke=has_smoke,
+            hazard_score=hazard_score,
+            people_count=people_count,
+            crowd_density=crowd_density,
+            rec_route=rec_route,
+            rec_exit=rec_exit,
+            total_route_cost=total_route_cost,
+            route_changed_this_frame=route_changed,
+            previous_route=previous_route
+        )
+        self.alert_manager.sync_facility_emergency_state(emergency_state)
+
+        # Trigger zone alert & security guard dispatch if active fire/smoke or severe crowd congestion
         if has_fire or has_smoke:
             self.alert_manager.trigger_hazard_alert(
                 location=f"{u} <-> {v}",
                 hazard_type="FIRE" if has_fire else "SMOKE",
-                severity="CRITICAL" if has_fire else "WARNING",
+                severity="CRITICAL" if (has_fire or hazard_score >= 0.70) else "WARNING",
                 hazard_score=hazard_score,
                 people_count=people_count,
                 crowd_density=crowd_density,
                 recommended_exit=rec_exit,
-                route_str=rec_route_str
+                route_str=rec_route_str,
+                frame=frame
             )
+        elif crowd_density >= 0.70:
+            self.alert_manager.trigger_hazard_alert(
+                location=f"{u} <-> {v}",
+                hazard_type="CROWD_CONGESTION",
+                severity="WARNING",
+                hazard_score=hazard_score,
+                people_count=people_count,
+                crowd_density=crowd_density,
+                recommended_exit=rec_exit,
+                route_str=rec_route_str,
+                frame=frame
+            )
+
+        # Enrich unified emergency_state with synchronized alert/signage/PA state
+        emergency_state["dynamic_signage"] = self.alert_manager.dynamic_signage
+        emergency_state["pa_announcement"] = self.alert_manager.current_pa_message
+        emergency_state["active_alerts_count"] = len(self.alert_manager.active_alerts)
+        emergency_state["unacknowledged_alerts_count"] = len(
+            [a for a in self.alert_manager.active_alerts if not a.get("acknowledged", False)]
+        )
+        self.current_emergency_state = emergency_state
 
         # Timing & Latency Metrics
         t_total_ms = (time.time() - t_start_total) * 1000
@@ -321,7 +556,8 @@ class EvacuationSystem:
             "fire_detections": fire_detections,
             "crowd_detections": crowd_detections,
             "annotated_frame": annotated_frame,
-            # IEEE Extended Features:
+            # Unified Emergency State & IEEE Extended Features:
+            "emergency_state": emergency_state,
             "previous_route": previous_route,
             "route_changed": route_changed,
             "route_change_event": route_change_event,
