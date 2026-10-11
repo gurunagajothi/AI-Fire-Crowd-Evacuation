@@ -292,6 +292,102 @@ class EvacuationSystem:
             "adaptation_reason": adaptation_reason,
         }
 
+    REQUIRED_EMERGENCY_STATE_KEYS: Tuple[str, ...] = (
+        "is_emergency",
+        "status_level",
+        "hazard_type",
+        "crowd_status",
+        "zone_status",
+        "active_edge",
+        "active_zone_str",
+        "source_room",
+        "fire_detected",
+        "smoke_detected",
+        "hazard_score",
+        "people_count",
+        "crowd_density",
+        "baseline_route",
+        "baseline_route_str",
+        "baseline_exit",
+        "baseline_cost",
+        "recommended_route",
+        "recommended_route_str",
+        "recommended_exit",
+        "total_route_cost",
+        "cost_delta_vs_baseline",
+        "compromised_exits",
+        "avoided_exit",
+        "is_diverted_from_baseline",
+        "route_changed_this_frame",
+        "previous_route",
+        "adaptation_reason",
+        "dynamic_signage",
+        "pa_announcement",
+        "active_alerts_count",
+        "unacknowledged_alerts_count",
+    )
+
+    def ensure_emergency_state(
+        self,
+        result: Dict[str, Any],
+        source_room: str = "ROOM_A",
+        active_edge: Tuple[str, str] = ("CORRIDOR_1", "EXIT_A")
+    ) -> Dict[str, Any]:
+        """
+        Guarantees that `result["emergency_state"]` exists and contains all required
+        fields of the unified facility emergency state. If `result` is missing
+        `emergency_state` or any required key (e.g. from a cached/skipped frame or
+        legacy result dict), reconstructs and synchronizes the full emergency state.
+        """
+        existing = result.get("emergency_state")
+        core_keys = self.REQUIRED_EMERGENCY_STATE_KEYS[:-4]
+
+        if not isinstance(existing, dict) or not all(k in existing for k in core_keys):
+            graph = self.building_graph.get_graph()
+            all_exits = [n for n, d in graph.nodes(data=True) if d.get("node_type") == "EXIT"]
+            if not all_exits:
+                all_exits = ["EXIT_A", "EXIT_B"]
+
+            edge_val = result.get("active_edge", active_edge)
+            if not isinstance(edge_val, tuple) or len(edge_val) != 2:
+                edge_val = active_edge
+
+            rec_route = result.get("recommended_route", [])
+            rec_exit = result.get("recommended_exit", "NONE")
+            total_cost = float(result.get("total_route_cost", 0.0))
+
+            rebuilt = self.build_facility_emergency_state(
+                graph=graph,
+                source_room=source_room,
+                active_edge=edge_val,
+                all_exits=all_exits,
+                has_fire=bool(result.get("fire_detected", False)),
+                has_smoke=bool(result.get("smoke_detected", False)),
+                hazard_score=float(result.get("hazard_score", 0.0)),
+                people_count=int(result.get("people_detected", 0)),
+                crowd_density=float(result.get("crowd_density", 0.0)),
+                rec_route=rec_route,
+                rec_exit=rec_exit,
+                total_route_cost=total_cost,
+                route_changed_this_frame=bool(result.get("route_changed", False)),
+                previous_route=result.get("previous_route")
+            )
+            if hasattr(self.alert_manager, "sync_facility_emergency_state"):
+                self.alert_manager.sync_facility_emergency_state(rebuilt)
+            em_state = rebuilt
+        else:
+            em_state = existing.copy()
+
+        em_state["dynamic_signage"] = self.alert_manager.dynamic_signage
+        em_state["pa_announcement"] = self.alert_manager.current_pa_message
+        em_state["active_alerts_count"] = len(self.alert_manager.active_alerts)
+        em_state["unacknowledged_alerts_count"] = len(
+            [a for a in self.alert_manager.active_alerts if not a.get("acknowledged", False)]
+        )
+        self.current_emergency_state = em_state
+        result["emergency_state"] = em_state
+        return em_state
+
     def process_frame(
         self,
         frame: np.ndarray,
@@ -330,7 +426,7 @@ class EvacuationSystem:
         # Handle frame skipping in continuous video stream mode ONLY when configuration & frame match
         if (
             enable_frame_skip
-            and (self.frame_counter % skip_interval != 0)
+            and (self.frame_counter % max(1, skip_interval) != 0)
             and self.cached_result is not None
             and self._last_cache_signature == cache_sig
         ):
@@ -338,6 +434,7 @@ class EvacuationSystem:
             cached = self.cached_result.copy()
             cached["frames_processed"] = self.processed_frames_counter
             cached["frames_skipped"] = self.skipped_frames_counter
+            self.ensure_emergency_state(cached, source_room=source_room, active_edge=active_edge)
             cached["dynamic_signage"] = self.alert_manager.dynamic_signage
             cached["current_pa_message"] = self.alert_manager.current_pa_message
             cached["security_guard_log"] = self.alert_manager.get_guard_log()
@@ -582,6 +679,7 @@ class EvacuationSystem:
             }
         }
 
+        self.ensure_emergency_state(result_dict, source_room=source_room, active_edge=active_edge)
         self.cached_result = result_dict
         return result_dict
 

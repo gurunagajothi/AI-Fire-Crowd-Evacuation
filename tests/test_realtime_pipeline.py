@@ -37,7 +37,7 @@ from integration.evacuation_system import EvacuationSystem
 
 
 def run_tests():
-    total_tests = 17
+    total_tests = 19
     passed = 0
     failed = 0
 
@@ -475,6 +475,119 @@ def run_tests():
         passed += 1
     except Exception as e:
         print(f"[FAIL] Test 17: {e}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
+    # TEST 18: Regression — Complete emergency_state Across All Return Paths
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 18: Regression — Complete emergency_state Schema Across All Return Paths (Full + Frame-Skip)...")
+    try:
+        assert system_reg is not None and fire_frame is not None
+        req_keys = EvacuationSystem.REQUIRED_EMERGENCY_STATE_KEYS
+        assert len(req_keys) == 32, f"Expected 32 required emergency_state keys, got {len(req_keys)}"
+
+        # 1. Full inference path on fire frame
+        res_full = system_reg.process_frame(
+            frame=fire_frame,
+            active_edge=("CORRIDOR_1", "EXIT_A"),
+            source_room="ROOM_A",
+            enable_frame_skip=True,
+            skip_interval=5
+        )
+        assert "emergency_state" in res_full
+        for k in req_keys:
+            assert k in res_full["emergency_state"], f"Missing key '{k}' in full-inference emergency_state"
+
+        # 2. Frame-skip cached return path (normal cached_result)
+        res_skip = system_reg.process_frame(
+            frame=fire_frame,
+            active_edge=("CORRIDOR_1", "EXIT_A"),
+            source_room="ROOM_A",
+            enable_frame_skip=True,
+            skip_interval=5
+        )
+        assert "emergency_state" in res_skip
+        for k in req_keys:
+            assert k in res_skip["emergency_state"], f"Missing key '{k}' in frame-skip emergency_state"
+
+        # 3. Frame-skip return path when cached_result had emergency_state stripped (stale cache recovery)
+        if system_reg.cached_result is not None and "emergency_state" in system_reg.cached_result:
+            del system_reg.cached_result["emergency_state"]
+        res_skip_recovered = system_reg.process_frame(
+            frame=fire_frame,
+            active_edge=("CORRIDOR_1", "EXIT_A"),
+            source_room="ROOM_A",
+            enable_frame_skip=True,
+            skip_interval=5
+        )
+        assert "emergency_state" in res_skip_recovered
+        for k in req_keys:
+            assert k in res_skip_recovered["emergency_state"], f"Missing key '{k}' in recovered frame-skip emergency_state"
+        assert res_skip_recovered["emergency_state"]["recommended_exit"] == "EXIT_B"
+        print(f"[PASS] Test 18: All {len(req_keys)} emergency_state keys verified on full, skipped, and cache-recovery return paths.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 18: {e}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
+    # TEST 19: Regression — Dashboard Hot-Reload & Legacy Result Synthesis
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 19: Regression — Streamlit Cloud Hot-Reload & Legacy Result Synthesis...")
+    try:
+        from dashboard.app import ensure_complete_emergency_state, _ensure_fresh_system_modules
+        assert system_reg is not None
+
+        reloaded_cls = _ensure_fresh_system_modules()
+        assert hasattr(reloaded_cls, "build_facility_emergency_state")
+        assert hasattr(reloaded_cls, "ensure_emergency_state")
+
+        # Simulate a legacy result dict returned by a stale pre-hot-reload instance without 'emergency_state'
+        legacy_result = {
+            "fire_detected": True,
+            "smoke_detected": False,
+            "hazard_score": 0.875,
+            "people_detected": 4,
+            "crowd_density": 0.20,
+            "active_edge": ("CORRIDOR_1", "EXIT_A"),
+            "updated_edge_cost": 9.75,
+            "recommended_exit": "EXIT_B",
+            "recommended_route": ["ROOM_A", "CORRIDOR_1", "CORRIDOR_2", "EXIT_B"],
+            "recommended_route_str": "ROOM_A -> CORRIDOR_1 -> CORRIDOR_2 -> EXIT_B",
+            "total_route_cost": 2.40,
+            "route_changed": False,
+            "previous_route": None,
+        }
+        # Also test fallback synthesis when system is a minimal legacy object without ensure_emergency_state
+        class LegacySystemStub:
+            def __init__(self, real_sys):
+                self.building_graph = real_sys.building_graph
+                self.optimizer = real_sys.optimizer
+                self.alert_manager = AlertManager()
+
+        legacy_stub = LegacySystemStub(system_reg)
+        synthesized = ensure_complete_emergency_state(
+            system=legacy_stub,
+            result=legacy_result,
+            source_room="ROOM_A",
+            active_edge=("CORRIDOR_1", "EXIT_A")
+        )
+        assert "emergency_state" in legacy_result
+        for k in EvacuationSystem.REQUIRED_EMERGENCY_STATE_KEYS:
+            assert k in synthesized, f"Missing key '{k}' in synthesized emergency_state"
+        assert synthesized["is_emergency"] is True
+        assert synthesized["status_level"] == "CRITICAL"
+        assert synthesized["hazard_type"] == "FIRE"
+        assert synthesized["recommended_exit"] == "EXIT_B"
+        assert synthesized["avoided_exit"] == "EXIT_A"
+        assert synthesized["dynamic_signage"]["EXIT_A"]["status"] == "CLOSED / AVOID"
+        assert synthesized["dynamic_signage"]["EXIT_B"]["status"] == "SAFE ROUTE"
+        assert "nominal" not in synthesized["pa_announcement"].lower()
+        assert "EXIT_B" in synthesized["pa_announcement"]
+        print("[PASS] Test 19: Hot-reload module sync and deterministic legacy emergency_state synthesis verified.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 19: {e}")
         failed += 1
 
     print("\n" + "=" * 70)

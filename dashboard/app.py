@@ -15,6 +15,7 @@ Full Architecture & Navigation:
 """
 
 import datetime
+import importlib
 import json
 import sys
 import tempfile
@@ -153,12 +154,258 @@ st.markdown(get_custom_css(), unsafe_allow_html=True)
 
 
 # -----------------------------------------------------------------------------
-# CACHED SYSTEM INSTANCES (CPU INFERENCE)
+# CACHED SYSTEM INSTANCES & HOT-RELOAD SYNCHRONIZATION (CPU INFERENCE)
 # -----------------------------------------------------------------------------
+REQUIRED_EMERGENCY_STATE_KEYS: Tuple[str, ...] = (
+    "is_emergency",
+    "status_level",
+    "hazard_type",
+    "crowd_status",
+    "zone_status",
+    "active_edge",
+    "active_zone_str",
+    "source_room",
+    "fire_detected",
+    "smoke_detected",
+    "hazard_score",
+    "people_count",
+    "crowd_density",
+    "baseline_route",
+    "baseline_route_str",
+    "baseline_exit",
+    "baseline_cost",
+    "recommended_route",
+    "recommended_route_str",
+    "recommended_exit",
+    "total_route_cost",
+    "cost_delta_vs_baseline",
+    "compromised_exits",
+    "avoided_exit",
+    "is_diverted_from_baseline",
+    "route_changed_this_frame",
+    "previous_route",
+    "adaptation_reason",
+    "dynamic_signage",
+    "pa_announcement",
+    "active_alerts_count",
+    "unacknowledged_alerts_count",
+)
+
+
+def _ensure_fresh_system_modules():
+    """
+    Ensures that `alerts.alert_manager` and `integration.evacuation_system` in
+    `sys.modules` are up-to-date when Streamlit Cloud hot-reloads `dashboard/app.py`
+    without restarting the Python process.
+    """
+    global EvacuationSystem
+    import alerts.alert_manager as am_mod
+    import integration.evacuation_system as es_mod
+
+    if not hasattr(am_mod.AlertManager, "sync_facility_emergency_state"):
+        am_mod = importlib.reload(am_mod)
+    if (
+        not hasattr(es_mod.EvacuationSystem, "build_facility_emergency_state")
+        or not hasattr(es_mod.EvacuationSystem, "ensure_emergency_state")
+    ):
+        es_mod = importlib.reload(es_mod)
+    EvacuationSystem = es_mod.EvacuationSystem
+    return EvacuationSystem
+
+
+def ensure_complete_emergency_state(
+    system: Any,
+    result: Dict[str, Any],
+    source_room: str = "ROOM_A",
+    active_edge: Tuple[str, str] = ("CORRIDOR_1", "EXIT_A")
+) -> Dict[str, Any]:
+    """
+    Verifies that `result["emergency_state"]` exists and contains every required field.
+    If `system` has `ensure_emergency_state`, delegates to it first. If any required
+    key is still missing (e.g. from a stale cached object during Streamlit Cloud hot-reload),
+    deterministically constructs a complete, valid facility emergency state from `result`
+    and `system`'s graph/optimizer/alert_manager.
+    """
+    if system is not None and hasattr(system, "ensure_emergency_state"):
+        system.ensure_emergency_state(result, source_room=source_room, active_edge=active_edge)
+
+    em = result.get("emergency_state")
+    if isinstance(em, dict) and all(k in em for k in REQUIRED_EMERGENCY_STATE_KEYS):
+        return em
+
+    # Deterministic synthesis of a complete, valid emergency state if missing/incomplete
+    u, v = active_edge
+    has_fire = bool(result.get("fire_detected", False))
+    has_smoke = bool(result.get("smoke_detected", False))
+    hazard_score = float(result.get("hazard_score", 0.0))
+    people_count = int(result.get("people_detected", 0))
+    crowd_density = float(result.get("crowd_density", 0.0))
+    rec_route = list(result.get("recommended_route", []))
+    rec_exit = str(result.get("recommended_exit", "NONE"))
+    total_route_cost = float(result.get("total_route_cost", 0.0))
+    route_changed_this_frame = bool(result.get("route_changed", False))
+    previous_route = result.get("previous_route")
+
+    baseline_route: List[str] = ["ROOM_A", "CORRIDOR_1", "EXIT_A"]
+    baseline_exit = "EXIT_A"
+    baseline_cost = 0.0
+    compromised_exits: List[str] = []
+    edge_len = 10.0
+    updated_edge_cost = float(result.get("updated_edge_cost", GAMMA * edge_len))
+    baseline_edge_cost = GAMMA * edge_len
+
+    if system is not None and hasattr(system, "building_graph") and hasattr(system, "optimizer"):
+        graph = system.building_graph.get_graph()
+        all_exits = [n for n, d in graph.nodes(data=True) if d.get("node_type") == "EXIT"] or ["EXIT_A", "EXIT_B"]
+        clean_graph = graph.copy()
+        for u_n, v_n in clean_graph.edges:
+            clean_graph[u_n][v_n]["hazard"] = 0.0
+            clean_graph[u_n][v_n]["density"] = 0.0
+        system.optimizer.update_all_edge_costs(clean_graph)
+        b_info = system.optimizer.find_safest_route(clean_graph, source=source_room, exits=all_exits)
+        baseline_route = b_info.get("path", [])
+        baseline_exit = b_info.get("selected_exit", "NONE")
+        baseline_cost = float(b_info.get("total_cost", 0.0))
+
+        if graph.has_edge(u, v):
+            edge_len = float(graph[u][v].get("length", 10.0))
+            updated_edge_cost = float(graph[u][v].get("cost", updated_edge_cost))
+            baseline_edge_cost = system.optimizer.gamma * edge_len
+
+        for ex in all_exits:
+            if ex in graph.nodes:
+                for nbr in graph.neighbors(ex):
+                    edge_data = graph[nbr][ex]
+                    if edge_data.get("hazard", 0.0) > 0.0 or edge_data.get("density", 0.0) >= 0.70:
+                        if ex not in compromised_exits:
+                            compromised_exits.append(ex)
+
+    if has_fire or hazard_score >= 0.70:
+        hazard_status, hazard_type = "CRITICAL", "FIRE"
+    elif has_smoke or hazard_score >= 0.40:
+        hazard_status, hazard_type = "WARNING", "SMOKE"
+    elif hazard_score > 0.0:
+        hazard_status, hazard_type = "CAUTION", "LOW HAZARD"
+    elif crowd_density >= 0.70:
+        hazard_status, hazard_type = "WARNING", "CROWD_CONGESTION"
+    else:
+        hazard_status, hazard_type = "NORMAL", "NONE"
+
+    if crowd_density >= 0.70:
+        crowd_status = "HIGH CONGESTION"
+    elif crowd_density >= 0.35:
+        crowd_status = "MODERATE"
+    else:
+        crowd_status = "NORMAL"
+
+    is_emergency = bool(has_fire or has_smoke or hazard_score > 0.0 or crowd_density >= 0.70)
+    zone_status = (
+        "CRITICAL"
+        if (hazard_status in ["CRITICAL", "WARNING"] or crowd_status == "HIGH CONGESTION")
+        else ("CAUTION" if (hazard_status == "CAUTION" or crowd_status == "MODERATE") else "NORMAL")
+    )
+
+    is_diverted_from_baseline = (rec_route != baseline_route)
+    if is_emergency and baseline_exit not in ("", "NONE", "UNKNOWN", rec_exit):
+        if baseline_exit not in compromised_exits:
+            compromised_exits.append(baseline_exit)
+
+    avoided_exit = (
+        compromised_exits[0]
+        if compromised_exits
+        else (baseline_exit if (is_diverted_from_baseline and baseline_exit != rec_exit) else None)
+    )
+
+    if is_diverted_from_baseline:
+        if has_fire or hazard_score >= 0.70:
+            adaptation_reason = (
+                f"Corridor edge {u} <-> {v} compromised by Fire Hazard ({hazard_score:.3f}). "
+                f"Edge cost increased from {baseline_edge_cost:.2f} to {updated_edge_cost:.2f}. "
+                f"Dynamic Dijkstra rerouted origin {source_room} from {baseline_exit} to {rec_exit}."
+            )
+        elif has_smoke or hazard_score > 0.0:
+            adaptation_reason = (
+                f"Corridor edge {u} <-> {v} compromised by Smoke Hazard ({hazard_score:.3f}). "
+                f"Air quality and visibility impaired. Rerouted from {baseline_exit} to {rec_exit}."
+            )
+        elif crowd_density >= 0.70:
+            adaptation_reason = (
+                f"Severe occupant congestion on {u} <-> {v} (Density: {crowd_density:.3f}). "
+                f"Dynamic Dijkstra diverted path from {baseline_exit} to {rec_exit} to prevent crowd crush."
+            )
+        else:
+            adaptation_reason = f"Dynamic path cost adjustments made alternate route via {rec_exit} globally optimal."
+    else:
+        if is_emergency:
+            adaptation_reason = (
+                f"Hazard/congestion active on {u} <-> {v} (Score: {hazard_score:.3f}), "
+                f"and route via {rec_exit} remains the lowest-cost safe egress path (Total Cost: {total_route_cost:.2f})."
+            )
+        else:
+            adaptation_reason = (
+                f"Direct egress route to {baseline_exit} remains unobstructed and optimal "
+                f"(Total Cost: {total_route_cost:.2f}). No detour required."
+            )
+
+    synthesized = {
+        "is_emergency": is_emergency,
+        "status_level": hazard_status,
+        "hazard_type": hazard_type,
+        "crowd_status": crowd_status,
+        "zone_status": zone_status,
+        "active_edge": active_edge,
+        "active_zone_str": f"{u} <-> {v}",
+        "source_room": source_room,
+        "fire_detected": has_fire,
+        "smoke_detected": has_smoke,
+        "hazard_score": round(hazard_score, 3),
+        "people_count": people_count,
+        "crowd_density": round(crowd_density, 3),
+        "baseline_route": baseline_route,
+        "baseline_route_str": " -> ".join(baseline_route) if baseline_route else "NONE",
+        "baseline_exit": baseline_exit,
+        "baseline_cost": round(baseline_cost, 2),
+        "recommended_route": rec_route,
+        "recommended_route_str": " -> ".join(rec_route) if rec_route else "NO SAFE ROUTE",
+        "recommended_exit": rec_exit,
+        "total_route_cost": round(total_route_cost, 2),
+        "cost_delta_vs_baseline": round(total_route_cost - baseline_cost, 2),
+        "compromised_exits": compromised_exits,
+        "avoided_exit": avoided_exit,
+        "is_diverted_from_baseline": is_diverted_from_baseline,
+        "route_changed_this_frame": route_changed_this_frame,
+        "previous_route": previous_route,
+        "adaptation_reason": adaptation_reason,
+    }
+
+    alert_mgr = getattr(system, "alert_manager", None) if system is not None else None
+    if alert_mgr is not None:
+        if hasattr(alert_mgr, "sync_facility_emergency_state"):
+            alert_mgr.sync_facility_emergency_state(synthesized)
+        elif hasattr(alert_mgr, "update_dynamic_signage"):
+            alert_mgr.update_dynamic_signage(recommended_exit=rec_exit, dangerous_exit=compromised_exits)
+        synthesized["dynamic_signage"] = getattr(alert_mgr, "dynamic_signage", result.get("dynamic_signage", {}))
+        synthesized["pa_announcement"] = getattr(alert_mgr, "current_pa_message", result.get("current_pa_message", ""))
+        active_alerts = getattr(alert_mgr, "active_alerts", [])
+        synthesized["active_alerts_count"] = len(active_alerts)
+        synthesized["unacknowledged_alerts_count"] = len([a for a in active_alerts if not a.get("acknowledged", False)])
+    else:
+        synthesized["dynamic_signage"] = result.get("dynamic_signage", {})
+        synthesized["pa_announcement"] = result.get("current_pa_message", "")
+        synthesized["active_alerts_count"] = 0
+        synthesized["unacknowledged_alerts_count"] = 0
+
+    result["emergency_state"] = synthesized
+    result["dynamic_signage"] = synthesized["dynamic_signage"]
+    result["current_pa_message"] = synthesized["pa_announcement"]
+    return synthesized
+
+
 @st.cache_resource(show_spinner="Loading Pretrained YOLO Models & Evacuation Engine (CPU)...")
-def get_system(_schema_version: str = "v3_unified_emergency_state"):
+def get_system(_schema_version: str = "v4_unified_emergency_state_hotreload"):
     try:
-        sys_inst = EvacuationSystem()
+        evac_cls = _ensure_fresh_system_modules()
+        sys_inst = evac_cls()
         return sys_inst, None
     except Exception as e:
         return None, str(e)
@@ -201,14 +448,17 @@ def get_available_test_videos() -> List[str]:
 # MAIN APPLICATION
 # -----------------------------------------------------------------------------
 def main():
-    # Load Core Engines
+    # Load Core Engines (with hot-reload submodule verification)
+    _ensure_fresh_system_modules()
     system, init_err = get_system()
     if system is not None and (
         not hasattr(system, "build_facility_emergency_state")
+        or not hasattr(system, "ensure_emergency_state")
         or not hasattr(system.alert_manager, "sync_facility_emergency_state")
     ):
+        _ensure_fresh_system_modules()
         st.cache_resource.clear()
-        system, init_err = get_system()
+        system, init_err = get_system(_schema_version="v4_unified_emergency_state_hotreload_refreshed")
     if init_err:
         st.error(f"[!] System Engine Initialization Failed: {init_err}")
         return
@@ -532,7 +782,13 @@ def main():
             st.error(f"⚠️ Error executing pipeline on current frame: {e}")
             return
 
-    # Unpack unified facility emergency state (Single Source of Truth)
+    # Verify & unpack unified facility emergency state (Single Source of Truth)
+    ensure_complete_emergency_state(
+        system=system,
+        result=result,
+        source_room=source_room,
+        active_edge=active_edge
+    )
     emergency_state = result["emergency_state"]
     has_fire = emergency_state["fire_detected"]
     has_smoke = emergency_state["smoke_detected"]
@@ -715,6 +971,7 @@ def main():
                 b_frame = cv2.imread(str(img_p))
                 t0_b = time.time()
                 res = system.process_frame(b_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
+                ensure_complete_emergency_state(system=system, result=res, source_room=source_room, active_edge=active_edge)
                 dt_b = (time.time() - t0_b) * 1000.0
                 b_res.append({
                     "Scenario": sc_name,
