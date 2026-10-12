@@ -37,7 +37,7 @@ from integration.evacuation_system import EvacuationSystem
 
 
 def run_tests():
-    total_tests = 19
+    total_tests = 20
     passed = 0
     failed = 0
 
@@ -588,6 +588,77 @@ def run_tests():
         passed += 1
     except Exception as e:
         print(f"[FAIL] Test 19: {e}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
+    # TEST 20: Regression — Stale AlertManager Missing sync_facility_emergency_state
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 20: Regression — Stale AlertManager Class/Instance Missing sync_facility_emergency_state...")
+    try:
+        import alerts.alert_manager as am_mod
+        import integration.evacuation_system as es_mod
+        from dashboard.app import _ensure_fresh_system_modules, _ensure_compatible_system_instance
+        assert system_reg is not None and fire_frame is not None
+
+        # Define a legacy AlertManager class lacking `sync_facility_emergency_state`
+        class StaleLegacyAlertManager:
+            def __init__(self):
+                self.active_alerts = [{"alert_id": "ALT-LEGACY-01", "type": "SMOKE", "location": "ROOM_B", "acknowledged": False}]
+                self.guard_alert_log = list(self.active_alerts)
+                self.route_history = []
+                self.snapshot_dir = DATA_DIR / "processed" / "snapshots"
+                self.dynamic_signage = {
+                    "EXIT_A": {"status": "OPEN / AVAILABLE", "indicator": "EXIT A", "color": "green"},
+                    "EXIT_B": {"status": "OPEN / AVAILABLE", "indicator": "EXIT B", "color": "green"},
+                }
+                self.current_pa_message = "Facility conditions nominal. Follow standard exit signs if required."
+
+            def get_guard_log(self, limit: int = 15):
+                return self.guard_alert_log[:limit]
+
+            def get_route_history(self, limit: int = 10):
+                return self.route_history[:limit]
+
+        # 1. Simulate module-level class mismatch where es_mod.AlertManager points to StaleLegacyAlertManager
+        es_mod.AlertManager = StaleLegacyAlertManager
+        assert not hasattr(es_mod.AlertManager, "sync_facility_emergency_state")
+        _ensure_fresh_system_modules()
+        assert es_mod.AlertManager is am_mod.AlertManager, "Expected es_mod.AlertManager to match am_mod.AlertManager"
+        assert hasattr(es_mod.AlertManager, "sync_facility_emergency_state")
+
+        # 2. Simulate an existing cached EvacuationSystem instance holding a StaleLegacyAlertManager object
+        stale_am_instance = StaleLegacyAlertManager()
+        assert not hasattr(stale_am_instance, "sync_facility_emergency_state")
+        system_reg.alert_manager = stale_am_instance
+
+        # Verify process_frame upgrades system_reg.alert_manager in-place (preserving existing alerts)
+        # and executes FIRE -> EXIT_B emergency state synchronization without AttributeError
+        res_stale_fix = system_reg.process_frame(
+            frame=fire_frame,
+            active_edge=("CORRIDOR_1", "EXIT_A"),
+            source_room="ROOM_A",
+            enable_frame_skip=False
+        )
+        assert hasattr(system_reg.alert_manager, "sync_facility_emergency_state"), "Expected stale alert_manager to be upgraded"
+        assert any(a.get("alert_id") == "ALT-LEGACY-01" for a in system_reg.alert_manager.active_alerts), (
+            "Expected prior active_alerts to be preserved during AlertManager upgrade"
+        )
+        em_fixed = res_stale_fix["emergency_state"]
+        assert em_fixed["fire_detected"] is True
+        assert em_fixed["recommended_exit"] == "EXIT_B"
+        assert em_fixed["dynamic_signage"]["EXIT_A"]["status"] == "CLOSED / AVOID"
+        assert em_fixed["dynamic_signage"]["EXIT_B"]["status"] == "SAFE ROUTE"
+        assert "nominal" not in em_fixed["pa_announcement"].lower()
+        assert "EXIT_B" in em_fixed["pa_announcement"]
+
+        # 3. Also verify _ensure_compatible_system_instance upgrades a stale alert_manager directly
+        system_reg.alert_manager = StaleLegacyAlertManager()
+        upgraded_sys = _ensure_compatible_system_instance(system_reg)
+        assert hasattr(upgraded_sys.alert_manager, "sync_facility_emergency_state")
+        print("[PASS] Test 20: Stale AlertManager missing sync_facility_emergency_state upgraded & FIRE -> EXIT_B synchronized.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 20: {e}")
         failed += 1
 
     print("\n" + "=" * 70)

@@ -195,22 +195,98 @@ REQUIRED_EMERGENCY_STATE_KEYS: Tuple[str, ...] = (
 def _ensure_fresh_system_modules():
     """
     Ensures that `alerts.alert_manager` and `integration.evacuation_system` in
-    `sys.modules` are up-to-date when Streamlit Cloud hot-reloads `dashboard/app.py`
-    without restarting the Python process.
+    `sys.modules` are up-to-date and reference the exact same `AlertManager` class
+    when Streamlit Cloud hot-reloads `dashboard/app.py` without restarting the process.
+    Does not reload modules on normal reruns when class definitions are already aligned.
     """
     global EvacuationSystem
     import alerts.alert_manager as am_mod
     import integration.evacuation_system as es_mod
 
+    am_reloaded = False
     if not hasattr(am_mod.AlertManager, "sync_facility_emergency_state"):
         am_mod = importlib.reload(am_mod)
-    if (
-        not hasattr(es_mod.EvacuationSystem, "build_facility_emergency_state")
+        am_reloaded = True
+
+    es_needs_reload = (
+        am_reloaded
+        or getattr(es_mod, "AlertManager", None) is not am_mod.AlertManager
+        or not hasattr(getattr(es_mod, "AlertManager", None), "sync_facility_emergency_state")
+        or not hasattr(es_mod.EvacuationSystem, "build_facility_emergency_state")
         or not hasattr(es_mod.EvacuationSystem, "ensure_emergency_state")
-    ):
+        or not hasattr(es_mod.EvacuationSystem, "_ensure_compatible_alert_manager")
+    )
+    if es_needs_reload:
         es_mod = importlib.reload(es_mod)
+        es_mod.AlertManager = am_mod.AlertManager
+
     EvacuationSystem = es_mod.EvacuationSystem
     return EvacuationSystem
+
+
+def _ensure_compatible_system_instance(system: Any) -> Any:
+    """
+    Verifies that a cached `EvacuationSystem` instance and its `alert_manager`
+    attribute use current, compatible class definitions. If `system` or
+    `system.alert_manager` is an instance of a stale pre-reload class, upgrades
+    them coherently while preserving loaded YOLO models and existing alert logs.
+    """
+    if system is None:
+        return None
+
+    evac_cls = _ensure_fresh_system_modules()
+    import alerts.alert_manager as am_mod
+
+    # 1. Ensure system.alert_manager has sync_facility_emergency_state
+    if hasattr(system, "_ensure_compatible_alert_manager"):
+        system._ensure_compatible_alert_manager()
+    else:
+        current_am = getattr(system, "alert_manager", None)
+        if current_am is None or not hasattr(current_am, "sync_facility_emergency_state"):
+            upgraded_am = am_mod.AlertManager()
+            if current_am is not None:
+                for attr in (
+                    "active_alerts",
+                    "guard_alert_log",
+                    "route_history",
+                    "dynamic_signage",
+                    "current_pa_message",
+                    "snapshot_dir",
+                ):
+                    if hasattr(current_am, attr):
+                        setattr(upgraded_am, attr, getattr(current_am, attr))
+            system.alert_manager = upgraded_am
+
+    # 2. If `system` itself is an instance of a stale EvacuationSystem class, upgrade it
+    #    reusing the already-loaded CPU YOLO detectors and building graph.
+    if (
+        not hasattr(system, "build_facility_emergency_state")
+        or not hasattr(system, "ensure_emergency_state")
+        or not hasattr(system, "_ensure_compatible_alert_manager")
+    ):
+        upgraded_sys = evac_cls(
+            building_graph=getattr(system, "building_graph", None),
+            optimizer=getattr(system, "optimizer", None),
+            fire_detector=getattr(system, "fire_detector", None),
+            crowd_detector=getattr(system, "crowd_detector", None),
+            alert_manager=getattr(system, "alert_manager", None),
+        )
+        for state_attr in (
+            "frame_counter",
+            "processed_frames_counter",
+            "skipped_frames_counter",
+            "last_routes",
+            "last_costs",
+            "_last_active_edge",
+            "_last_cache_signature",
+            "current_emergency_state",
+            "cached_result",
+        ):
+            if hasattr(system, state_attr):
+                setattr(upgraded_sys, state_attr, getattr(system, state_attr))
+        return upgraded_sys
+
+    return system
 
 
 def ensure_complete_emergency_state(
@@ -226,6 +302,8 @@ def ensure_complete_emergency_state(
     deterministically constructs a complete, valid facility emergency state from `result`
     and `system`'s graph/optimizer/alert_manager.
     """
+    if system is not None and hasattr(system, "_ensure_compatible_alert_manager"):
+        system._ensure_compatible_alert_manager()
     if system is not None and hasattr(system, "ensure_emergency_state"):
         system.ensure_emergency_state(result, source_room=source_room, active_edge=active_edge)
 
@@ -382,8 +460,21 @@ def ensure_complete_emergency_state(
     if alert_mgr is not None:
         if hasattr(alert_mgr, "sync_facility_emergency_state"):
             alert_mgr.sync_facility_emergency_state(synthesized)
-        elif hasattr(alert_mgr, "update_dynamic_signage"):
-            alert_mgr.update_dynamic_signage(recommended_exit=rec_exit, dangerous_exit=compromised_exits)
+        else:
+            if hasattr(alert_mgr, "update_dynamic_signage"):
+                alert_mgr.update_dynamic_signage(recommended_exit=rec_exit, dangerous_exit=compromised_exits)
+            if is_emergency and hasattr(alert_mgr, "generate_pa_announcement"):
+                alert_mgr.generate_pa_announcement(
+                    recommended_exit=rec_exit,
+                    dangerous_zone=synthesized["active_zone_str"],
+                    reason=adaptation_reason,
+                    hazard_type=hazard_type,
+                    hazard_score=hazard_score,
+                    crowd_density=crowd_density,
+                    route_str=synthesized["recommended_route_str"],
+                )
+            elif not is_emergency:
+                alert_mgr.current_pa_message = "Facility conditions nominal. Follow standard exit signs if required."
         synthesized["dynamic_signage"] = getattr(alert_mgr, "dynamic_signage", result.get("dynamic_signage", {}))
         synthesized["pa_announcement"] = getattr(alert_mgr, "current_pa_message", result.get("current_pa_message", ""))
         active_alerts = getattr(alert_mgr, "active_alerts", [])
@@ -402,10 +493,11 @@ def ensure_complete_emergency_state(
 
 
 @st.cache_resource(show_spinner="Loading Pretrained YOLO Models & Evacuation Engine (CPU)...")
-def get_system(_schema_version: str = "v4_unified_emergency_state_hotreload"):
+def get_system(_schema_version: str = "v5_coherent_alert_manager_sync"):
     try:
         evac_cls = _ensure_fresh_system_modules()
         sys_inst = evac_cls()
+        sys_inst = _ensure_compatible_system_instance(sys_inst)
         return sys_inst, None
     except Exception as e:
         return None, str(e)
@@ -448,20 +540,13 @@ def get_available_test_videos() -> List[str]:
 # MAIN APPLICATION
 # -----------------------------------------------------------------------------
 def main():
-    # Load Core Engines (with hot-reload submodule verification)
+    # Load Core Engines and verify class & instance compatibility
     _ensure_fresh_system_modules()
     system, init_err = get_system()
-    if system is not None and (
-        not hasattr(system, "build_facility_emergency_state")
-        or not hasattr(system, "ensure_emergency_state")
-        or not hasattr(system.alert_manager, "sync_facility_emergency_state")
-    ):
-        _ensure_fresh_system_modules()
-        st.cache_resource.clear()
-        system, init_err = get_system(_schema_version="v4_unified_emergency_state_hotreload_refreshed")
     if init_err:
         st.error(f"[!] System Engine Initialization Failed: {init_err}")
         return
+    system = _ensure_compatible_system_instance(system)
 
     multi_floor_model = get_multi_floor_model()
     assistant = get_decision_assistant()

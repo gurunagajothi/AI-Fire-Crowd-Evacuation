@@ -8,6 +8,7 @@ Connects:
 5. Continuous Video Processing & Latency Diagnostics
 """
 
+import importlib
 import time
 from datetime import datetime
 from pathlib import Path
@@ -30,7 +31,24 @@ from detection.fire_detector import FireSmokeDetector
 from detection.crowd_detector import CrowdDetector
 from graph.building_graph import BuildingGraph
 from graph.dijkstra_optimizer import DynamicDijkstraOptimizer
+import alerts.alert_manager as alert_manager_module
 from alerts.alert_manager import AlertManager
+
+
+def _resolve_alert_manager_class():
+    """
+    Resolves the current `AlertManager` class from `alerts.alert_manager`.
+    Reloads `alerts.alert_manager` only if the currently loaded class lacks
+    `sync_facility_emergency_state` (e.g. during a Streamlit Cloud hot-reload),
+    and keeps module-level `AlertManager` synchronized.
+    """
+    global AlertManager, alert_manager_module
+    cls = getattr(alert_manager_module, "AlertManager", AlertManager)
+    if not hasattr(cls, "sync_facility_emergency_state"):
+        alert_manager_module = importlib.reload(alert_manager_module)
+        cls = alert_manager_module.AlertManager
+    AlertManager = cls
+    return cls
 
 
 class EvacuationSystem:
@@ -73,8 +91,10 @@ class EvacuationSystem:
         except Exception as e:
             raise RuntimeError(f"[!] Failed to initialize vision models: {e}")
 
-        # 4. Alert & Signage Manager
-        self.alert_manager = alert_manager or AlertManager()
+        # 4. Alert & Signage Manager (guarantee compatible AlertManager definition)
+        alert_cls = _resolve_alert_manager_class()
+        self.alert_manager = alert_manager if alert_manager is not None else alert_cls()
+        self._ensure_compatible_alert_manager()
 
         # 5. Continuous Video Processing & State Tracking
         self.frame_counter: int = 0
@@ -94,6 +114,65 @@ class EvacuationSystem:
         self.cached_result: Optional[Dict[str, Any]] = None
 
         print("[+] EvacuationSystem successfully initialized with all perception, optimization, and alert engines.")
+
+    def _ensure_compatible_alert_manager(self) -> AlertManager:
+        """
+        Ensures `self.alert_manager` is an instance of a compatible `AlertManager`
+        class that implements `sync_facility_emergency_state`. If `self.alert_manager`
+        was instantiated from a stale pre-reload `AlertManager` class, upgrades it
+        in-place while preserving all active alerts, guard logs, signage, PA text,
+        and route history.
+        """
+        alert_cls = _resolve_alert_manager_class()
+        current_am = getattr(self, "alert_manager", None)
+        if current_am is None:
+            self.alert_manager = alert_cls()
+            return self.alert_manager
+
+        if hasattr(current_am, "sync_facility_emergency_state"):
+            return current_am
+
+        upgraded = alert_cls()
+        for attr in (
+            "active_alerts",
+            "guard_alert_log",
+            "route_history",
+            "dynamic_signage",
+            "current_pa_message",
+            "snapshot_dir",
+        ):
+            if hasattr(current_am, attr):
+                setattr(upgraded, attr, getattr(current_am, attr))
+        self.alert_manager = upgraded
+        return self.alert_manager
+
+    def _sync_alert_manager_state(self, emergency_state: Dict[str, Any]) -> None:
+        """
+        Synchronizes `self.alert_manager` with the unified facility emergency state,
+        upgrading stale `AlertManager` instances automatically if needed.
+        """
+        am = self._ensure_compatible_alert_manager()
+        if hasattr(am, "sync_facility_emergency_state"):
+            am.sync_facility_emergency_state(emergency_state)
+            return
+
+        # Coherent fallback if a custom external alert_manager object was injected
+        rec_exit = emergency_state.get("recommended_exit", "NONE")
+        compromised_exits = emergency_state.get("compromised_exits", [])
+        if hasattr(am, "update_dynamic_signage"):
+            am.update_dynamic_signage(recommended_exit=rec_exit, dangerous_exit=compromised_exits)
+        if emergency_state.get("is_emergency", False) and hasattr(am, "generate_pa_announcement"):
+            am.generate_pa_announcement(
+                recommended_exit=rec_exit,
+                dangerous_zone=emergency_state.get("active_zone_str", ""),
+                reason=emergency_state.get("adaptation_reason", ""),
+                hazard_type=emergency_state.get("hazard_type", "NONE"),
+                hazard_score=emergency_state.get("hazard_score", 0.0),
+                crowd_density=emergency_state.get("crowd_density", 0.0),
+                route_str=emergency_state.get("recommended_route_str", ""),
+            )
+        else:
+            am.current_pa_message = "Facility conditions nominal. Follow standard exit signs if required."
 
     def map_points_to_demo_zones(
         self,
@@ -339,6 +418,7 @@ class EvacuationSystem:
         `emergency_state` or any required key (e.g. from a cached/skipped frame or
         legacy result dict), reconstructs and synchronizes the full emergency state.
         """
+        self._ensure_compatible_alert_manager()
         existing = result.get("emergency_state")
         core_keys = self.REQUIRED_EMERGENCY_STATE_KEYS[:-4]
 
@@ -372,8 +452,7 @@ class EvacuationSystem:
                 route_changed_this_frame=bool(result.get("route_changed", False)),
                 previous_route=result.get("previous_route")
             )
-            if hasattr(self.alert_manager, "sync_facility_emergency_state"):
-                self.alert_manager.sync_facility_emergency_state(rebuilt)
+            self._sync_alert_manager_state(rebuilt)
             em_state = rebuilt
         else:
             em_state = existing.copy()
@@ -410,6 +489,7 @@ class EvacuationSystem:
         if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
             raise ValueError("[!] Input frame is empty or invalid.")
 
+        self._ensure_compatible_alert_manager()
         self.frame_counter += 1
         t_start_total = time.time()
 
@@ -579,7 +659,7 @@ class EvacuationSystem:
             route_changed_this_frame=route_changed,
             previous_route=previous_route
         )
-        self.alert_manager.sync_facility_emergency_state(emergency_state)
+        self._sync_alert_manager_state(emergency_state)
 
         # Trigger zone alert & security guard dispatch if active fire/smoke or severe crowd congestion
         if has_fire or has_smoke:
