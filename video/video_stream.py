@@ -26,14 +26,19 @@ def is_cloud_environment() -> bool:
     """
     if os.environ.get("STREAMLIT_SHARING_MODE") or os.environ.get("IS_STREAMLIT_CLOUD"):
         return True
+    if os.environ.get("STREAMLIT_SERVER_HEADLESS") == "true" and sys.platform.startswith("linux"):
+        return True
     if sys.platform.startswith("linux"):
         # Streamlit Cloud mounts workspace under /mount/src or runs as appuser without /dev/video*
         if Path("/mount/src").exists() or os.environ.get("USER") == "appuser":
+            return True
+        if "streamlit" in os.environ.get("HOSTNAME", "").lower():
             return True
         has_video_dev = any(Path("/dev").glob("video*")) if Path("/dev").exists() else False
         if not has_video_dev and os.environ.get("DISPLAY") is None:
             return True
     return False
+
 
 
 def get_preferred_capture_backends() -> List[Tuple[str, Optional[int]]]:
@@ -84,6 +89,8 @@ def discover_available_cameras(
     """
     if backends is not None:
         pass_list = [backends]
+    elif is_cloud_environment():
+        return []
     elif (sys.platform.startswith("win") or os.name == "nt") and hasattr(cv2, "CAP_DSHOW"):
         # Fast pass with DirectShow (~20ms per unoccupied index vs ~1.2s with MSMF),
         # with fallback pass to MSMF/CAP_ANY if DirectShow finds no cameras.
@@ -91,6 +98,7 @@ def discover_available_cameras(
         pass_list = [[("CAP_DSHOW", int(cv2.CAP_DSHOW))], fallback_win]
     else:
         pass_list = [get_preferred_capture_backends()]
+
 
     discovered: List[Dict[str, Any]] = []
 
@@ -206,6 +214,16 @@ class VideoStreamHandler:
 
             # 1. Local Camera Index Path (0..5) — Multi-Backend Probing + Frame Verification
             if isinstance(actual_source, int):
+                if is_cloud_environment() and self.preferred_backend is None:
+                    self.cap = None
+                    self.status = "ERROR"
+                    self.error_message = (
+                        f"Unable to open video source: {self.source} — Server camera index {actual_source} is unavailable. "
+                        f"OpenCV on Streamlit Cloud runs on a remote cloud container and cannot directly access the physical webcam on your laptop. "
+                        f"Please select 'Browser Webcam' or 'Upload Image / Upload Video'."
+                    )
+                    return False
+
                 candidate_backends: List[Tuple[str, Optional[int]]] = []
                 if self.preferred_backend is not None:
                     candidate_backends.append(("PREFERRED", self.preferred_backend))
@@ -278,7 +296,16 @@ class VideoStreamHandler:
 
             # 2. Video File / RTSP / HTTP Stream Path
             if self.source_type == "RTSP_STREAM":
+                if is_cloud_environment() and ("127.0.0.1" in str(actual_source) or "localhost" in str(actual_source)):
+                    self.cap = None
+                    self.status = "ERROR"
+                    self.error_message = (
+                        f"Unable to open video source: {self.source} — Localhost RTSP stream ({actual_source}) is not reachable on remote cloud servers. "
+                        f"Please provide an accessible external RTSP URL or switch to 'Upload Video'."
+                    )
+                    return False
                 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
+
 
             cap = _open_capture_with_backend(actual_source, None)
             if cap is None or not cap.isOpened():
