@@ -49,9 +49,52 @@ from integration.evacuation_system import EvacuationSystem
 from integration.multi_camera_sim import MultiCameraSimulator
 from integration.decision_assistant import EmergencyDecisionAssistant
 from graph.multi_floor_graph import MultiFloorBuildingGraph
-from video.video_stream import VideoStreamHandler
+import threading
+from video.video_stream import (
+    VideoStreamHandler,
+    discover_available_cameras,
+    is_cloud_environment,
+)
 from integration.hazard_trend import TemporalHazardTracker
 from dashboard.styles import get_custom_css
+
+try:
+    from streamlit_webrtc import (
+        webrtc_streamer,
+        WebRtcMode,
+        RTCConfiguration,
+        VideoProcessorBase,
+    )
+    import av
+    WEBRTC_AVAILABLE = True
+except ImportError:
+    WEBRTC_AVAILABLE = False
+    VideoProcessorBase = object  # type: ignore
+
+
+class BrowserWebcamProcessor(VideoProcessorBase):
+    """Thread-safe WebRTC video processor capturing browser webcam frames."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.latest_frame: Optional[np.ndarray] = None
+        self.frame_count: int = 0
+        self.last_timestamp: float = 0.0
+
+    def recv(self, frame: "av.VideoFrame") -> "av.VideoFrame":
+        img = frame.to_ndarray(format="bgr24")
+        with self._lock:
+            self.latest_frame = img.copy()
+            self.frame_count += 1
+            self.last_timestamp = time.time()
+        return frame
+
+    def get_latest_frame(self) -> Tuple[Optional[np.ndarray], int]:
+        with self._lock:
+            if self.latest_frame is None:
+                return None, self.frame_count
+            return self.latest_frame.copy(), self.frame_count
+
 try:
     from dashboard.components import (
         render_header,
@@ -552,7 +595,6 @@ def main():
     assistant = get_decision_assistant()
 
     # -------------------------------------------------------------------------
-    # SESSION STATE INITIALIZATION
     # -------------------------------------------------------------------------
     # SESSION STATE INITIALIZATION
     # -------------------------------------------------------------------------
@@ -568,6 +610,10 @@ def main():
         st.session_state.active_sample_file = "flames_sample.jpg"
     if "input_method" not in st.session_state:
         st.session_state.input_method = "Quick Test Sample"
+    if "discovered_cameras" not in st.session_state:
+        st.session_state.discovered_cameras = None
+    if "last_camera_error" not in st.session_state:
+        st.session_state.last_camera_error = ""
     if "run_benchmark_active" not in st.session_state:
         st.session_state.run_benchmark_active = False
     if "telemetry_history" not in st.session_state:
@@ -599,6 +645,7 @@ def main():
     input_options = [
         "Quick Test Sample",
         "CCTV Demo Video",
+        "Browser Webcam (WebRTC / Cloud)",
         "Laptop Webcam",
         "External USB Camera",
         "Upload Video",
@@ -610,14 +657,95 @@ def main():
         curr_idx = input_options.index(st.session_state.input_method)
 
     selected_method = st.sidebar.radio("CCTV Media Source", options=input_options, index=curr_idx)
+    if st.session_state.input_method != selected_method:
+        # Cleanly release any active OpenCV camera/stream when switching input modes
+        if st.session_state.video_stream is not None:
+            st.session_state.video_stream.release()
+            st.session_state.video_stream = None
+        st.session_state.monitoring_active = False
+        st.session_state.camera_simulator.unbind_stream("CAM-01")
+        st.session_state.last_camera_error = ""
     st.session_state.input_method = selected_method
 
     # Extra parameters depending on source
-    usb_idx = 1
+    cloud_env = is_cloud_environment()
+    cam_device_idx = 0 if selected_method == "Laptop Webcam" else 1
     rtsp_url = "rtsp://127.0.0.1:8554/live"
     up_vid_file = None
-    if selected_method == "External USB Camera":
-        usb_idx = st.sidebar.number_input("USB Camera Index", min_value=1, max_value=5, value=1)
+    browser_cam_mode = "Live WebRTC Stream (Continuous)"
+    webrtc_auto_refresh = True
+
+    if selected_method == "Browser Webcam (WebRTC / Cloud)":
+        st.sidebar.caption(
+            "Streams video directly from your browser camera. Works on both **Streamlit Cloud** and **Local** browsers."
+        )
+        browser_modes = ["Live WebRTC Stream (Continuous)", "HTML5 Camera Capture (Firewall-Safe)"]
+        if not WEBRTC_AVAILABLE:
+            browser_modes = ["HTML5 Camera Capture (Firewall-Safe)"]
+        browser_cam_mode = st.sidebar.radio(
+            "Browser Capture Engine",
+            options=browser_modes,
+            index=0,
+            help="Use Live WebRTC for continuous real-time streaming, or HTML5 Camera Capture if your network firewall blocks WebRTC UDP."
+        )
+        if browser_cam_mode == "Live WebRTC Stream (Continuous)":
+            webrtc_auto_refresh = st.sidebar.checkbox(
+                "Continuous AI Telemetry Refresh",
+                value=True,
+                help="Automatically re-evaluates incoming WebRTC frames through Dual YOLOv8 and Dynamic Dijkstra."
+            )
+
+    elif selected_method in ["Laptop Webcam", "External USB Camera"]:
+        if cloud_env:
+            st.sidebar.warning(
+                "☁️ **Streamlit Cloud Detected**: Server-side OpenCV (`cv2.VideoCapture`) runs on a remote cloud container and cannot access your physical camera. "
+                "Please select **Browser Webcam (WebRTC / Cloud)** above."
+            )
+        else:
+            if st.sidebar.button("🔍 Scan Local Cameras (0–5)", use_container_width=True):
+                with st.sidebar.spinner("Probing camera indices 0–5..."):
+                    st.session_state.discovered_cameras = discover_available_cameras(max_index=5)
+                    st.session_state.last_camera_error = ""
+
+            discovered = st.session_state.discovered_cameras
+            default_idx = 0 if selected_method == "Laptop Webcam" else 1
+
+            if discovered is not None:
+                if len(discovered) > 0:
+                    cam_options = {
+                        f"Index {c['index']} — {c['resolution']} ({c['backend']})": int(c["index"])
+                        for c in discovered
+                    }
+                    option_labels = list(cam_options.keys())
+                    # Pick best default option for the selected mode
+                    preferred_label_idx = 0
+                    if selected_method == "External USB Camera":
+                        for idx_pos, c in enumerate(discovered):
+                            if int(c["index"]) >= 1:
+                                preferred_label_idx = idx_pos
+                                break
+                    selected_cam_label = st.sidebar.selectbox(
+                        "Detected Local Cameras",
+                        options=option_labels,
+                        index=preferred_label_idx,
+                        help="Select a verified local camera discovered by OpenCV."
+                    )
+                    default_idx = cam_options[selected_cam_label]
+                else:
+                    st.sidebar.warning(
+                        "⚠️ No active cameras responded on indices 0–5. Check USB connection, close other apps using the camera, or verify Windows Camera Privacy permissions."
+                    )
+
+            cam_device_idx = int(
+                st.sidebar.number_input(
+                    "Camera Device Index (0–5)",
+                    min_value=0,
+                    max_value=5,
+                    value=int(default_idx),
+                    help="Index 0 is typically the built-in laptop webcam; indices 1–5 are typically external USB or virtual cameras."
+                )
+            )
+
     elif selected_method == "RTSP Network Stream":
         rtsp_url = st.sidebar.text_input("RTSP Stream URL", value="rtsp://127.0.0.1:8554/live", help="Format: rtsp://username:password@ip:port/stream")
     elif selected_method == "Upload Video":
@@ -629,13 +757,11 @@ def main():
         mon_col1, mon_col2 = st.sidebar.columns(2)
         with mon_col1:
             if st.button("▶ START", use_container_width=True):
-                target_src = 0
+                target_src: Any = 0
                 if selected_method == "CCTV Demo Video":
                     target_src = str(DATA_DIR / "test" / "demo_cctv_feed.mp4")
-                elif selected_method == "Laptop Webcam":
-                    target_src = 0
-                elif selected_method == "External USB Camera":
-                    target_src = int(usb_idx)
+                elif selected_method in ["Laptop Webcam", "External USB Camera"]:
+                    target_src = int(cam_device_idx)
                 elif selected_method == "RTSP Network Stream":
                     target_src = rtsp_url.strip()
                 elif selected_method == "Upload Video":
@@ -649,17 +775,31 @@ def main():
                 # Release prior stream if active
                 if st.session_state.video_stream is not None:
                     st.session_state.video_stream.release()
+                    st.session_state.video_stream = None
 
                 stream = VideoStreamHandler(source=target_src)
                 if stream.start_stream():
                     st.session_state.video_stream = stream
                     st.session_state.monitoring_active = True
+                    st.session_state.last_camera_error = ""
                     st.session_state.camera_simulator.bind_stream("CAM-01", stream)
                     st.sidebar.success(f"Connected: {stream.source_type}")
                     st.rerun()
                 else:
                     st.session_state.monitoring_active = False
-                    st.sidebar.error(f"Connection Failed: {stream.error_message}")
+                    st.session_state.video_stream = None
+                    err_detail = stream.error_message
+                    # If local camera index failed and we haven't scanned yet, probe available indices to help the user
+                    if isinstance(target_src, int) and not cloud_env:
+                        avail = discover_available_cameras(max_index=5)
+                        st.session_state.discovered_cameras = avail
+                        if avail:
+                            found_str = ", ".join(
+                                f"Index {c['index']} ({c['backend']}, {c['resolution']})" for c in avail
+                            )
+                            err_detail = f"{err_detail} | Available camera indices detected on this system: {found_str}."
+                    st.session_state.last_camera_error = err_detail
+                    st.sidebar.error(f"Connection Failed: {err_detail}")
 
         with mon_col2:
             if st.button("⏹ STOP", use_container_width=True):
@@ -667,9 +807,13 @@ def main():
                     st.session_state.video_stream.release()
                     st.session_state.video_stream = None
                 st.session_state.monitoring_active = False
+                st.session_state.last_camera_error = ""
                 st.session_state.camera_simulator.unbind_stream("CAM-01")
-                st.sidebar.info("Monitoring halted.")
+                st.sidebar.info("Monitoring halted and camera handle released.")
                 st.rerun()
+
+        if st.session_state.last_camera_error and not st.session_state.monitoring_active:
+            st.sidebar.error(f"Diagnostic: {st.session_state.last_camera_error}")
 
         # Monitoring status badge in sidebar
         if st.session_state.monitoring_active and st.session_state.video_stream is not None:
@@ -677,8 +821,8 @@ def main():
             st.sidebar.markdown(f"""
             <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10B981; border-radius: 6px; padding: 6px 10px; margin-top: 6px; font-size: 0.8rem; color: #34D399;">
                 🟢 <strong>RUNNING:</strong> {v_tel['source_type']}<br>
-                FPS: <strong>{v_tel['fps']}</strong> &bull; Res: <strong>{v_tel['resolution']}</strong><br>
-                Frames: <strong>{v_tel['frame_count']}</strong>
+                Backend: <strong>{v_tel.get('backend', 'AUTO')}</strong> &bull; FPS: <strong>{v_tel['fps']}</strong><br>
+                Res: <strong>{v_tel['resolution']}</strong> &bull; Frames: <strong>{v_tel['frame_count']}</strong>
             </div>
             """, unsafe_allow_html=True)
 
@@ -758,6 +902,7 @@ def main():
     input_frame = None
     media_source_description = ""
     is_video_mode = False
+    webrtc_playing_active = False
 
     # 1. Active Live Stream Monitoring Path (Persistent Handle)
     if st.session_state.monitoring_active and st.session_state.video_stream is not None:
@@ -767,13 +912,16 @@ def main():
             input_frame = v_frame
             v_tel = st.session_state.video_stream.get_telemetry()
             media_source_description = (
-                f"🟢 Live Monitoring Active &bull; {v_tel['source_type']} &bull; "
+                f"🟢 Live Monitoring Active &bull; {v_tel['source_type']} ({v_tel.get('backend', 'AUTO')}) &bull; "
                 f"Running FPS: {v_tel['fps']} &bull; Res: {v_tel['resolution']} &bull; Frame: #{v_tel['frame_count']}"
             )
         else:
             # Stream disconnected or encountered error
-            st.session_state.monitoring_active = False
             err_msg = st.session_state.video_stream.error_message or "Camera feed interrupted"
+            st.session_state.video_stream.release()
+            st.session_state.video_stream = None
+            st.session_state.monitoring_active = False
+            st.session_state.camera_simulator.unbind_stream("CAM-01")
             st.session_state.camera_simulator.update_camera_telemetry(
                 cam_id="CAM-01",
                 fire_detected=False,
@@ -792,7 +940,74 @@ def main():
             st.warning("VideoStreamHandler released safely. Do NOT invent fake detections. Please check your camera device or RTSP endpoint and click '▶ START' to reconnect.")
             return
 
-    # 2. Standby / Static Sample Path
+    # 2. Browser Webcam Path (Streamlit Cloud & Local Browser via WebRTC or HTML5 Camera Input)
+    elif selected_method == "Browser Webcam (WebRTC / Cloud)":
+        st.markdown("### 🌐 Browser Webcam Acquisition (Cloud & Local Compatible)")
+        if browser_cam_mode == "Live WebRTC Stream (Continuous)" and WEBRTC_AVAILABLE:
+            webrtc_col1, webrtc_col2 = st.columns([1.3, 1.0])
+            with webrtc_col1:
+                rtc_config = RTCConfiguration(
+                    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]}
+                )
+                webrtc_ctx = webrtc_streamer(
+                    key="ai-fire-crowd-browser-webrtc",
+                    mode=WebRtcMode.SENDRECV,
+                    rtc_configuration=rtc_config,
+                    video_processor_factory=BrowserWebcamProcessor,
+                    media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
+                    async_processing=True,
+                )
+            with webrtc_col2:
+                st.info(
+                    "**Browser WebRTC Instructions:**\n"
+                    "1. Click **START** in the WebRTC player on the left and grant browser camera permissions.\n"
+                    "2. Live browser frames are routed directly into the Dual YOLOv8 Fire/Smoke + Crowd & Dynamic Dijkstra pipeline below.\n"
+                    "3. If your corporate/campus network blocks WebRTC UDP, switch **Browser Capture Engine** in the sidebar to **HTML5 Camera Capture (Firewall-Safe)**."
+                )
+
+            if webrtc_ctx.state.playing and webrtc_ctx.video_processor is not None:
+                webrtc_playing_active = True
+                is_video_mode = True
+                b_frame, b_count = webrtc_ctx.video_processor.get_latest_frame()
+                if b_frame is not None:
+                    input_frame = b_frame
+                    media_source_description = (
+                        f"🟢 Browser WebRTC Live Stream &bull; Frame #{b_count} &bull; "
+                        f"Res: {b_frame.shape[1]}x{b_frame.shape[0]}"
+                    )
+                else:
+                    sample_path = DATA_DIR / "test" / st.session_state.active_sample_file
+                    if sample_path.exists():
+                        input_frame = cv2.imread(str(sample_path))
+                    media_source_description = "🟡 Browser WebRTC Connected &bull; Awaiting initial video frame from browser..."
+            else:
+                sample_path = DATA_DIR / "test" / st.session_state.active_sample_file
+                if sample_path.exists():
+                    input_frame = cv2.imread(str(sample_path))
+                media_source_description = (
+                    "Standby Mode (Browser WebRTC) &bull; Click 'START' in the Browser Webcam widget above to stream from your camera."
+                )
+        else:
+            cam_photo = st.camera_input(
+                "📸 Capture Live Frame from Browser Camera (Works on Streamlit Cloud & Restricted Firewalls)"
+            )
+            if cam_photo is not None:
+                file_bytes = np.frombuffer(cam_photo.getvalue(), dtype=np.uint8)
+                decoded = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                if decoded is not None:
+                    input_frame = decoded
+                    media_source_description = (
+                        f"🟢 Browser Camera Capture ({decoded.shape[1]}x{decoded.shape[0]}) &bull; Processed via Dual YOLOv8 + Dynamic Dijkstra"
+                    )
+            if input_frame is None:
+                sample_path = DATA_DIR / "test" / st.session_state.active_sample_file
+                if sample_path.exists():
+                    input_frame = cv2.imread(str(sample_path))
+                media_source_description = (
+                    "Standby Mode (Browser HTML5 Camera) &bull; Click 'Take Photo' above to analyze a live frame from your webcam."
+                )
+
+    # 3. Standby / Static Sample Path
     elif selected_method.startswith("Quick Test"):
         sample_name = st.session_state.active_sample_file
         sample_path = DATA_DIR / "test" / sample_name
@@ -1485,6 +1700,10 @@ def main():
     if st.session_state.monitoring_active and st.session_state.video_stream is not None:
         time.sleep(0.04)
         st.rerun()
+    elif webrtc_playing_active and webrtc_auto_refresh:
+        time.sleep(0.15)
+        st.rerun()
+
 
 
 if __name__ == "__main__":

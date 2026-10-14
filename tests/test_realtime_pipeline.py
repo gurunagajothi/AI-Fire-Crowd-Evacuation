@@ -28,8 +28,9 @@ project_root = Path(__file__).resolve().parent.parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
+from unittest.mock import patch
 from config.config import DATA_DIR
-from video.video_stream import VideoStreamHandler
+from video.video_stream import VideoStreamHandler, discover_available_cameras
 from integration.hazard_trend import TemporalHazardTracker
 from alerts.alert_manager import AlertManager
 from integration.multi_camera_sim import MultiCameraSimulator
@@ -37,7 +38,7 @@ from integration.evacuation_system import EvacuationSystem
 
 
 def run_tests():
-    total_tests = 20
+    total_tests = 24
     passed = 0
     failed = 0
 
@@ -661,6 +662,204 @@ def run_tests():
         print(f"[FAIL] Test 20: {e}")
         failed += 1
 
+    # -------------------------------------------------------------------------
+    # TEST 21: Mocked Camera Discovery (Indices 0..5, Multi-Backend & Cleanup)
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 21: Mocked Camera Discovery (Indices 0..5, Frame Verification & Release)...")
+    try:
+        created_handles = []
+
+        class MockCaptureDiscovery:
+            def __init__(self, idx, backend=None):
+                self.idx = idx
+                self.backend = backend
+                self.released = False
+                created_handles.append(self)
+
+            def isOpened(self):
+                # Index 0 opens only on second backend (102); Index 1 opens; Index 2 opens on first backend (101)
+                if self.idx == 0 and self.backend == 102:
+                    return True
+                if self.idx == 1:
+                    return True
+                if self.idx == 2 and self.backend == 101:
+                    return True
+                return False
+
+            def read(self):
+                # Index 1 opens (isOpened=True) but fails frame read (busy/locked)
+                if self.idx == 0 and self.backend == 102:
+                    return True, np.zeros((480, 640, 3), dtype=np.uint8)
+                if self.idx == 1:
+                    return False, None
+                if self.idx == 2 and self.backend == 101:
+                    return True, np.zeros((720, 1280, 3), dtype=np.uint8)
+                return False, None
+
+            def release(self):
+                self.released = True
+
+        test_backends = [("BACKEND_A", 101), ("BACKEND_B", 102)]
+        with patch("video.video_stream.cv2.VideoCapture", side_effect=MockCaptureDiscovery):
+            discovered = discover_available_cameras(max_index=5, backends=test_backends)
+
+        found_indices = [d["index"] for d in discovered]
+        assert found_indices == [0, 2], f"Expected discovered indices [0, 2], got {found_indices}"
+        assert discovered[0]["backend"] == "BACKEND_B" and discovered[0]["resolution"] == "640x480"
+        assert discovered[1]["backend"] == "BACKEND_A" and discovered[1]["resolution"] == "1280x720"
+        assert len(created_handles) > 0
+        assert all(h.released for h in created_handles), "Expected all probed VideoCapture handles to be released"
+        print("[PASS] Test 21: Camera discovery (0..5) verified valid frames and released all probed handles.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 21: {e}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
+    # TEST 22: Mocked Camera Open Failure (isOpened() == False) & Cleanup
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 22: Mocked Camera Open Failure (isOpened() == False) & Diagnostic Message...")
+    try:
+        failed_handles = []
+
+        class MockFailedOpenCapture:
+            def __init__(self, src, backend=None):
+                self.src = src
+                self.backend = backend
+                self.released = False
+                failed_handles.append(self)
+
+            def isOpened(self):
+                return False
+
+            def read(self):
+                return False, None
+
+            def release(self):
+                self.released = True
+
+        with patch("video.video_stream.cv2.VideoCapture", side_effect=MockFailedOpenCapture):
+            cam_stream = VideoStreamHandler(source=1)
+            started = cam_stream.start_stream()
+
+        assert not started, "Expected start_stream() to return False when isOpened() is False"
+        assert cam_stream.status == "ERROR", f"Expected status ERROR, got {cam_stream.status}"
+        assert cam_stream.cap is None, "Expected self.cap to be None after failed open"
+        assert "Unable to open video source: 1" in cam_stream.error_message
+        assert len(failed_handles) > 0 and all(h.released for h in failed_handles), (
+            "Expected all failed VideoCapture instances to be released"
+        )
+        print("[PASS] Test 22: Failed camera open handled cleanly with release() and diagnostic message.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 22: {e}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
+    # TEST 23: Mocked Camera Frame Read Failure (isOpened() == True, read() Fails)
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 23: Mocked Camera Frame Read Failure (isOpened=True, read=(False, None))...")
+    try:
+        busy_handles = []
+
+        class MockBusyCameraCapture:
+            def __init__(self, src, backend=None):
+                self.src = src
+                self.backend = backend
+                self.released = False
+                busy_handles.append(self)
+
+            def isOpened(self):
+                return True
+
+            def read(self):
+                return False, None
+
+            def release(self):
+                self.released = True
+
+        with patch("video.video_stream.cv2.VideoCapture", side_effect=MockBusyCameraCapture):
+            busy_stream = VideoStreamHandler(source=0)
+            started_busy = busy_stream.start_stream()
+
+        assert not started_busy, "Expected start_stream() to fail when cap.read() returns (False, None)"
+        assert busy_stream.status == "ERROR", f"Expected status ERROR (not CONNECTED), got {busy_stream.status}"
+        assert busy_stream.cap is None, "Expected self.cap to be None after read failure"
+        assert "cap.read() returned an empty frame" in busy_stream.error_message
+        assert len(busy_handles) > 0 and all(h.released for h in busy_handles), (
+            "Expected busy VideoCapture handles to be released when read() fails"
+        )
+        print("[PASS] Test 23: Camera with isOpened()=True but failed read() rejected and released cleanly.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 23: {e}")
+        failed += 1
+
+    # -------------------------------------------------------------------------
+    # TEST 24: Multi-Backend Fallback, Prefetched Frame Delivery & Release
+    # -------------------------------------------------------------------------
+    print("\n[RUN] Test 24: Multi-Backend Fallback, Prefetched First Frame & Clean Release...")
+    try:
+        fallback_handles = []
+
+        class MockFallbackCameraCapture:
+            def __init__(self, src, backend=None):
+                self.src = src
+                self.backend = backend
+                self.released = False
+                self.read_calls = 0
+                fallback_handles.append(self)
+
+            def isOpened(self):
+                # Fail on first backend, succeed on second backend
+                return len(fallback_handles) >= 2
+
+            def read(self):
+                if not self.isOpened():
+                    return False, None
+                self.read_calls += 1
+                frame_val = 50 if self.read_calls == 1 else 120
+                return True, np.full((480, 640, 3), frame_val, dtype=np.uint8)
+
+            def get(self, prop):
+                if prop == cv2.CAP_PROP_FPS:
+                    return 30.0
+                return 0.0
+
+            def release(self):
+                self.released = True
+
+        with patch("video.video_stream.cv2.VideoCapture", side_effect=MockFallbackCameraCapture):
+            ok_stream = VideoStreamHandler(source=0)
+            started_ok = ok_stream.start_stream()
+            assert started_ok, f"Expected start_stream() to succeed on fallback backend: {ok_stream.error_message}"
+            assert ok_stream.status == "CONNECTED"
+            assert fallback_handles[0].released is True, "First failed backend handle must be released"
+            assert fallback_handles[1].released is False, "Active connected backend handle must remain open"
+            assert ok_stream.frame_count == 0, "Prefetched frame should not increment frame_count before get_frame()"
+
+            # First get_frame() should return the prefetched initial frame (pixel value 50)
+            ret1, f1 = ok_stream.get_frame()
+            assert ret1 and f1 is not None and int(f1[0, 0, 0]) == 50
+            assert ok_stream.frame_count == 1
+
+            # Second get_frame() should read the next frame from cap (pixel value 120)
+            ret2, f2 = ok_stream.get_frame()
+            assert ret2 and f2 is not None and int(f2[0, 0, 0]) == 120
+            assert ok_stream.frame_count == 2
+
+            # Clean release
+            ok_stream.release()
+            assert ok_stream.status == "DISCONNECTED", f"Expected status DISCONNECTED, got {ok_stream.status}"
+            assert ok_stream.cap is None
+            assert fallback_handles[1].released is True, "Active handle must be released on stream.release()"
+
+        print("[PASS] Test 24: Multi-backend fallback, prefetched frame delivery, and release() verified.")
+        passed += 1
+    except Exception as e:
+        print(f"[FAIL] Test 24: {e}")
+        failed += 1
+
     print("\n" + "=" * 70)
     print(f"RESULTS: {passed}/{total_tests} TESTS PASSED ({failed} FAILED)")
     print("=" * 70)
@@ -675,3 +874,4 @@ def run_tests():
 
 if __name__ == "__main__":
     sys.exit(run_tests())
+
