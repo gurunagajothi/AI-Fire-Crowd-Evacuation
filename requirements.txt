@@ -1,7 +1,7 @@
 # Core Computer Vision & Deep Learning
 torch>=2.0.0
 torchvision>=0.15.0
-ultralytics>=8.0.0
+ultralytics-opencv-headless>=8.0.0
 opencv-python-headless>=4.8.0
 
 # Graph Analytics & Algorithms
