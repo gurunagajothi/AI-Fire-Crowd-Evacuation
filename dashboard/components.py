@@ -14,12 +14,276 @@ Research Experiment Mode, IEEE Traceability Matrix, and Academic Limitations.
 from typing import List, Dict, Any, Tuple, Optional
 from pathlib import Path
 import datetime
+import html
 import json
+import textwrap
 import pandas as pd
 import streamlit as st
 
 from integration.multi_camera_sim import MultiCameraSimulator
 from integration.decision_assistant import EmergencyDecisionAssistant
+
+
+# =============================================================================
+# 0. CLEAN MODERN UI RENDERERS (AI Evacuation Assistant)
+# =============================================================================
+
+def render_simple_header(status: str = "ready"):
+    """
+    Renders the modern, clean header requested:
+    Title: AI EVACUATION ASSISTANT
+    Subtitle: AI-powered fire detection and evacuation guidance
+    Status indicator: System Ready / Evaluating / Emergency Detected
+    """
+    if status == "emergency":
+        badge_html = '<div class="status-badge status-emergency">🔴 Emergency Detected</div>'
+    elif status == "evaluating":
+        badge_html = '<div class="status-badge status-evaluating">🔵 Evaluating</div>'
+    else:
+        badge_html = '<div class="status-badge status-ready">🟢 System Ready</div>'
+
+    st.markdown(f"""
+    <div class="app-header">
+        <div class="app-header-left">
+            <h1 class="app-title">🚨 AI EVACUATION ASSISTANT</h1>
+            <div class="app-subtitle">AI-powered fire detection and evacuation guidance</div>
+        </div>
+        <div class="app-header-right">
+            {badge_html}
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+
+def render_evacuation_guidance_card(
+    recommended_exit: str,
+    recommended_route: List[str],
+    is_emergency: bool = False,
+    hazard_type: str = "NONE",
+    hazard_score: float = 0.0,
+    crowd_density: float = 0.0,
+    adaptation_reason: str = "",
+    avoided_exit: Optional[str] = None,
+    route_changed: bool = False,
+    total_cost: float = 0.0,
+    origin_room: Optional[str] = None,
+    hazard_zone: Optional[str] = None,
+    **kwargs: Any
+):
+    """
+    Renders the prominent evacuation guidance card — the central feature of the application.
+    Displays:
+    - High-visibility banner (Emergency Red / Nominal Green / Caution Amber)
+    - Recommended evacuation exit in bold typography
+    - Route diversion status badge (e.g., ROUTE DIVERTED vs DIRECT ROUTE)
+    - Total calculated dynamic traversal cost
+    - Connected pathway breadcrumbs ([ROOM] -> [CORRIDOR] -> [EXIT])
+    - Active hazard zone and avoided exit alerts
+    - Plain-English evacuation action directives
+    """
+    if is_emergency:
+        card_class = "evac-guidance-emergency"
+        header_color = "#DC2626"
+        header_tag = "🚨 EMERGENCY EVACUATION DIRECTIVE"
+        if hazard_type == "FIRE" or hazard_score >= 0.70:
+            haz_title = f"FIRE HAZARD DETECTED (Score: {hazard_score:.2f})"
+            default_action = f"Proceed immediately along the designated safe route toward {recommended_exit}. Do not enter compromised areas."
+        elif hazard_type == "SMOKE" or hazard_score > 0.0:
+            haz_title = f"SMOKE HAZARD DETECTED (Score: {hazard_score:.2f})"
+            default_action = f"Follow the green exit path toward {recommended_exit}. Stay low to avoid smoke inhalation."
+        else:
+            haz_title = f"CROWD BOTTLENECK DETECTED (Density: {crowd_density:.2f})"
+            default_action = f"Follow dynamic diversion toward {recommended_exit} to prevent crowd stampedes."
+        action_text = adaptation_reason if adaptation_reason else default_action
+    else:
+        card_class = "evac-guidance-normal"
+        header_color = "#16A34A"
+        header_tag = "✅ FACILITY CONDITIONS NOMINAL"
+        haz_title = "STANDARD SAFE EVACUATION ROUTE"
+        action_text = adaptation_reason if adaptation_reason else f"All primary corridors clear. Follow standard directional exit signs toward {recommended_exit}."
+
+    # Status diversion badge
+    if route_changed:
+        diversion_badge = '<span style="background: rgba(220, 38, 38, 0.15); color: #DC2626; border: 1px solid #FECACA; padding: 4px 10px; border-radius: 12px; font-size: 0.76rem; font-weight: 700; text-transform: uppercase;">⚠️ ROUTE DIVERTED</span>'
+    elif is_emergency:
+        diversion_badge = '<span style="background: rgba(217, 119, 6, 0.15); color: #D97706; border: 1px solid #FDE68A; padding: 4px 10px; border-radius: 12px; font-size: 0.76rem; font-weight: 700; text-transform: uppercase;">⚠️ HAZARD ACTIVE</span>'
+    else:
+        diversion_badge = '<span style="background: rgba(22, 163, 74, 0.15); color: #16A34A; border: 1px solid #BBF7D0; padding: 4px 10px; border-radius: 12px; font-size: 0.76rem; font-weight: 700; text-transform: uppercase;">🟢 DIRECT ROUTE</span>'
+
+    # Escape dynamic variables for trusted HTML output
+    safe_exit = html.escape(str(recommended_exit or "UNKNOWN"))
+    safe_action_text = html.escape(str(action_text))
+
+    # Build route flow breadcrumb pills
+    route_pills = []
+    if recommended_route:
+        for i, node in enumerate(recommended_route):
+            safe_node = html.escape(str(node))
+            if i == 0:
+                route_pills.append(f'<span class="route-node-origin">📍 {safe_node}</span>')
+            elif "EXIT" in str(node):
+                route_pills.append(f'<span class="route-node-exit">🚪 {safe_node} (Safe Exit)</span>')
+            else:
+                route_pills.append(f'<span class="route-node-pill">🚶 {safe_node}</span>')
+            if i < len(recommended_route) - 1:
+                route_pills.append('<span class="route-arrow">→</span>')
+    route_flow_html = " ".join(route_pills)
+
+    # Cost label
+    cost_html = ""
+    if total_cost > 0.0:
+        cost_html = f'<span style="font-size: 0.88rem; font-weight: 600; color: #64748B; margin-left: 12px;">(Traversal Cost: {total_cost:.2f})</span>'
+
+    # Hazard zone warning note (constructed as clean unindented HTML to avoid markdown code-block triggers)
+    hazard_zone_html = ""
+    if is_emergency and hazard_zone:
+        safe_hazard_zone = html.escape(str(hazard_zone))
+        hazard_zone_html = f'<div style="font-size: 0.82rem; color: #DC2626; font-weight: 600; margin-top: 6px;">⚠️ <strong>Compromised Corridor Zone:</strong> <code>{safe_hazard_zone}</code></div>'
+
+    # Avoided exit warning note (constructed as clean unindented HTML to avoid markdown code-block triggers)
+    avoided_note_html = ""
+    if is_emergency and avoided_exit and avoided_exit != recommended_exit:
+        safe_avoided_exit = html.escape(str(avoided_exit))
+        avoided_note_html = f'<div style="font-size: 0.82rem; color: #DC2626; font-weight: 600; margin-top: 6px;">⚠️ <strong>Notice:</strong> Direct egress via <strong>{safe_avoided_exit}</strong> is compromised and avoided by Dynamic Dijkstra.</div>'
+
+    card_html = (
+        f'<div class="{card_class}">'
+        f'<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; flex-wrap: wrap; gap: 6px;">'
+        f'<div class="evac-header-tag" style="color: {header_color};">{header_tag} &bull; {haz_title}</div>'
+        f'<div>{diversion_badge}</div>'
+        f'</div>'
+        f'<div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px;">'
+        f'<div>'
+        f'<div style="font-size: 0.78rem; font-weight: 700; color: #64748B; text-transform: uppercase;">RECOMMENDED EXIT</div>'
+        f'<div class="evac-exit-title" style="color: {header_color};">🚪 {safe_exit} {cost_html}</div>'
+        f'</div>'
+        f'</div>'
+        f'<div style="margin-top: 6px;">'
+        f'<div style="font-size: 0.78rem; font-weight: 700; color: #64748B; text-transform: uppercase;">YOUR EVACUATION ROUTE</div>'
+        f'<div class="route-flow-container">{route_flow_html}</div>'
+        f'</div>'
+        f'<div class="evac-action-instruction"><strong>Evacuation Instruction:</strong> {safe_action_text}</div>'
+        f'{hazard_zone_html}'
+        f'{avoided_note_html}'
+        f'</div>'
+    )
+    st.markdown(card_html, unsafe_allow_html=True)
+
+
+def render_detection_summary_cards(
+    fire_detected: bool = False,
+    smoke_detected: bool = False,
+    people_detected: int = 0,
+    hazard_score: float = 0.0,
+    crowd_density: float = 0.0,
+    total_route_cost: float = 0.0,
+    fire_conf: float = 0.0,
+    smoke_conf: float = 0.0,
+    status_level: str = "NORMAL",
+    **kwargs: Any
+):
+    """
+    Renders compact metric grid for detection results:
+    - Fire/Smoke: Detected / Not Detected (with confidence %)
+    - People Detected: count & crowd density
+    - Hazard Level: score & severity category
+    - Traversal Cost / Crowd Density: Dynamic Dijkstra cost or crowd metric
+    """
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        if fire_detected:
+            val_str = f"Fire Detected ({fire_conf*100:.0f}%)" if fire_conf > 0.0 else "Fire Detected"
+            tag_col, tag_bg = "#DC2626", "#FEF2F2"
+            icon = "🔥"
+        elif smoke_detected:
+            val_str = f"Smoke Detected ({smoke_conf*100:.0f}%)" if smoke_conf > 0.0 else "Smoke Detected"
+            tag_col, tag_bg = "#D97706", "#FFFBEB"
+            icon = "💨"
+        else:
+            val_str, tag_col, tag_bg = "Not Detected", "#16A34A", "#F0FDF4"
+            icon = "✅"
+        card1_html = (
+            f'<div class="clean-metric-card">'
+            f'<div class="clean-metric-label">Fire / Smoke</div>'
+            f'<div class="clean-metric-value" style="color: {tag_col}; font-size: 1.15rem;">{icon} {val_str}</div>'
+            f'<div style="margin-top: 4px;"><span class="clean-metric-tag" style="background: {tag_bg}; color: {tag_col};">Dual YOLOv8</span></div>'
+            f'</div>'
+        )
+        st.markdown(card1_html, unsafe_allow_html=True)
+
+    # Determine crowd label and colors
+    if crowd_density >= 0.70:
+        d_col, d_bg, d_lbl = "#DC2626", "#FEF2F2", "High Congestion"
+    elif crowd_density >= 0.35:
+        d_col, d_bg, d_lbl = "#D97706", "#FFFBEB", "Moderate"
+    else:
+        d_col, d_bg, d_lbl = "#16A34A", "#F0FDF4", "Clear"
+
+    with c2:
+        if total_route_cost > 0.0 and crowd_density > 0.0:
+            people_tag = f'<span class="clean-metric-tag" style="background: {d_bg}; color: {d_col};">Density: {crowd_density:.2f} ({d_lbl})</span>'
+        else:
+            people_tag = '<span class="clean-metric-tag" style="background: #EFF6FF; color: #2563EB;">COCO Model</span>'
+        card2_html = (
+            f'<div class="clean-metric-card">'
+            f'<div class="clean-metric-label">People Detected</div>'
+            f'<div class="clean-metric-value" style="font-size: 1.15rem;">👥 {people_detected} <span style="font-size: 0.85rem; font-weight: 500; color: #64748B;">occupants</span></div>'
+            f'<div style="margin-top: 4px;">{people_tag}</div>'
+            f'</div>'
+        )
+        st.markdown(card2_html, unsafe_allow_html=True)
+
+    with c3:
+        if hazard_score >= 0.70:
+            h_col, h_bg, h_lbl = "#DC2626", "#FEF2F2", "Critical"
+        elif hazard_score >= 0.35:
+            h_col, h_bg, h_lbl = "#D97706", "#FFFBEB", "Warning"
+        elif hazard_score > 0.0:
+            h_col, h_bg, h_lbl = "#D97706", "#FFFBEB", "Caution"
+        else:
+            h_col, h_bg, h_lbl = "#16A34A", "#F0FDF4", "Normal"
+        card3_html = (
+            f'<div class="clean-metric-card">'
+            f'<div class="clean-metric-label">Hazard Level</div>'
+            f'<div class="clean-metric-value" style="color: {h_col}; font-size: 1.15rem;">⚠️ {hazard_score:.2f}</div>'
+            f'<div style="margin-top: 4px;"><span class="clean-metric-tag" style="background: {h_bg}; color: {h_col};">{h_lbl} Level</span></div>'
+            f'</div>'
+        )
+        st.markdown(card3_html, unsafe_allow_html=True)
+
+    with c4:
+        if total_route_cost > 0.0:
+            if total_route_cost >= 6.0:
+                cost_col, cost_bg = "#DC2626", "#FEF2F2"
+            elif total_route_cost >= 4.5:
+                cost_col, cost_bg = "#D97706", "#FFFBEB"
+            else:
+                cost_col, cost_bg = "#2563EB", "#EFF6FF"
+            card4_html = (
+                f'<div class="clean-metric-card">'
+                f'<div class="clean-metric-label">Traversal Cost</div>'
+                f'<div class="clean-metric-value" style="color: {cost_col}; font-size: 1.15rem;">⚡ {total_route_cost:.2f}</div>'
+                f'<div style="margin-top: 4px;"><span class="clean-metric-tag" style="background: {cost_bg}; color: {cost_col};">Dynamic Dijkstra</span></div>'
+                f'</div>'
+            )
+        else:
+            card4_html = (
+                f'<div class="clean-metric-card">'
+                f'<div class="clean-metric-label">Crowd Density</div>'
+                f'<div class="clean-metric-value" style="color: {d_col}; font-size: 1.15rem;">🚶 {crowd_density:.2f}</div>'
+                f'<div style="margin-top: 4px;"><span class="clean-metric-tag" style="background: {d_bg}; color: {d_col};">{d_lbl}</span></div>'
+                f'</div>'
+            )
+        st.markdown(card4_html, unsafe_allow_html=True)
+
+
+def render_academic_disclaimer():
+    """Renders the required IEEE academic prototype disclaimer."""
+    st.markdown("""
+    <div class="academic-disclaimer">
+        ⚠️ <strong>Academic Research Prototype:</strong> This AI system is an academic research prototype developed for demonstration purposes. In real emergencies, always follow instructions from on-site emergency personnel and building safety management.
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # =============================================================================
@@ -1511,35 +1775,28 @@ def render_simulated_led_signage(signage_dict: Dict[str, Dict[str, str]]):
     cols = st.columns(len(effective_signage))
     for idx, (ex_id, data) in enumerate(effective_signage.items()):
         with cols[idx]:
+            safe_ex_id = html.escape(str(ex_id))
             status = str(data.get("status", "UNKNOWN")).upper()
             if "CLOSED" in status or "AVOID" in status:
-                st.markdown(f"""
-                <div class="led-board">
-                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
-                    <div class="led-sign-avoid">⛔ {ex_id}: CLOSED / AVOID</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="led-board"><div class="led-title">{safe_ex_id} DIGITAL SIGN</div><div class="led-sign-avoid">⛔ {safe_ex_id}: CLOSED / AVOID</div></div>',
+                    unsafe_allow_html=True
+                )
             elif "SAFE" in status:
-                st.markdown(f"""
-                <div class="led-board">
-                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
-                    <div class="led-sign-safe">🟢 {ex_id}: SAFE ROUTE</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="led-board"><div class="led-title">{safe_ex_id} DIGITAL SIGN</div><div class="led-sign-safe">🟢 {safe_ex_id}: SAFE ROUTE</div></div>',
+                    unsafe_allow_html=True
+                )
             elif "UNKNOWN" in status:
-                st.markdown(f"""
-                <div class="led-board">
-                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
-                    <div class="led-sign-standby" style="color: #FBBF24; border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08);">⚠️ {ex_id}: ROUTE SAFETY UNKNOWN</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="led-board"><div class="led-title">{safe_ex_id} DIGITAL SIGN</div><div class="led-sign-standby" style="color: #FBBF24; border-color: rgba(251, 191, 36, 0.4); background: rgba(251, 191, 36, 0.08);">⚠️ {safe_ex_id}: ROUTE SAFETY UNKNOWN</div></div>',
+                    unsafe_allow_html=True
+                )
             else:
-                st.markdown(f"""
-                <div class="led-board">
-                    <div class="led-title">{ex_id} DIGITAL SIGN</div>
-                    <div class="led-sign-standby">⚪ {ex_id}: STANDBY / AVAILABLE</div>
-                </div>
-                """, unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="led-board"><div class="led-title">{safe_ex_id} DIGITAL SIGN</div><div class="led-sign-standby">⚪ {safe_ex_id}: STANDBY / AVAILABLE</div></div>',
+                    unsafe_allow_html=True
+                )
 
 
 def render_pa_announcement(message: str):
@@ -1549,7 +1806,8 @@ def render_pa_announcement(message: str):
     msg_text = message if message else "Facility conditions nominal. Follow standard exit signs if required."
     is_emer_pa = ("ATTENTION OCCUPANTS" in msg_text.upper() or "EMERGENCY" in msg_text.upper() or "🚨" in msg_text or "⚠️" in msg_text)
     border_style = "border-left: 4px solid #EF4444; background: linear-gradient(135deg, rgba(239, 68, 68, 0.14) 0%, #0D1626 100%);" if is_emer_pa else ""
-    st.markdown(f'<div class="pa-box" style="{border_style}">📢 &ldquo;{msg_text}&rdquo;</div>', unsafe_allow_html=True)
+    safe_msg = html.escape(str(msg_text))
+    st.markdown(f'<div class="pa-box" style="{border_style}">📢 &ldquo;{safe_msg}&rdquo;</div>', unsafe_allow_html=True)
 
 
 def render_performance_telemetry(latency_info: Dict[str, Any], frame_skip_val: int):

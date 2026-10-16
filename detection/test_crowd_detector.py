@@ -16,7 +16,10 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 import cv2
+import numpy as np
+import pytest
 
 # Add project root to sys.path so config and detection packages are discoverable
 project_root = Path(__file__).resolve().parent.parent
@@ -27,8 +30,9 @@ from config.config import CONF_THRESHOLD_CROWD, MAX_EXPECTED_PEOPLE, OUTPUT_DIR,
 from detection.crowd_detector import CrowdDetector
 
 
-def test_image(detector: CrowdDetector, image_path: Path, output_path: Path, conf: float):
+def run_image_test(detector: CrowdDetector, image_path: Path, output_path: Path, conf: float):
     """Run crowd detection on a single image and save the annotated result."""
+
     print(f"\n[+] Testing Image: {image_path}")
     if not image_path.exists():
         print(f"[!] Error: Image file not found at: {image_path}")
@@ -71,7 +75,7 @@ def test_image(detector: CrowdDetector, image_path: Path, output_path: Path, con
     return True
 
 
-def test_video(detector: CrowdDetector, video_path: Path, output_path: Path, conf: float):
+def run_video_test(detector: CrowdDetector, video_path: Path, output_path: Path, conf: float):
     """Run crowd detection on a video file and save the annotated output video."""
     print(f"\n[+] Testing Video: {video_path}")
     if not video_path.exists():
@@ -123,7 +127,7 @@ def test_video(detector: CrowdDetector, video_path: Path, output_path: Path, con
     return True
 
 
-def test_webcam(detector: CrowdDetector, device_idx: int = 0, conf: float = 0.35):
+def run_webcam_test(detector: CrowdDetector, device_idx: int = 0, conf: float = 0.35):
     """Run live crowd detection from a connected webcam."""
     print(f"\n[+] Starting Live Webcam Crowd Detection on device index: {device_idx}")
     print("[*] Press 'q' in the window to quit live detection.")
@@ -206,28 +210,128 @@ def main():
 
     # Determine execution mode
     if args.webcam:
-        test_webcam(detector, device_idx=0, conf=args.conf)
+        run_webcam_test(detector, device_idx=0, conf=args.conf)
     elif args.video:
         in_path = Path(args.video)
         out_path = Path(args.output) if args.output else OUTPUT_DIR / f"annotated_{in_path.stem}.mp4"
-        test_video(detector, in_path, out_path, conf=args.conf)
+        run_video_test(detector, in_path, out_path, conf=args.conf)
     elif args.image:
         in_path = Path(args.image)
         out_path = Path(args.output) if args.output else OUTPUT_DIR / f"annotated_{in_path.stem}.jpg"
-        test_image(detector, in_path, out_path, conf=args.conf)
+        run_image_test(detector, in_path, out_path, conf=args.conf)
     else:
         # Default behavior: test on sample image in data/test/ if available
         sample_path = DATA_DIR / "test" / "crowd_sample.jpg"
         if sample_path.exists():
             print("[*] No test source specified. Testing on default crowd sample image...")
             out_path = OUTPUT_DIR / "annotated_crowd_sample.jpg"
-            test_image(detector, sample_path, out_path, conf=args.conf)
+            run_image_test(detector, sample_path, out_path, conf=args.conf)
         else:
             print("[*] No test input specified and no default crowd sample found.")
             print("[*] Usage examples:")
             print("    python detection/test_crowd_detector.py --image data/test/crowd_sample.jpg")
             print("    python detection/test_crowd_detector.py --video data/test/sample_video.mp4")
             print("    python detection/test_crowd_detector.py --webcam")
+
+
+# =============================================================================
+# Pytest Unit Test Suite (Mocked weights, no webcam requirement, fast CPU tests)
+# =============================================================================
+
+@pytest.fixture
+def mock_crowd_detector():
+    """Pytest fixture providing a CrowdDetector instance with mocked YOLO model."""
+    with patch.object(CrowdDetector, "_load_model"):
+        detector = CrowdDetector()
+        mock_model = MagicMock()
+        mock_model.names = {0: "person"}
+        detector.model = mock_model
+        return detector
+
+
+def test_crowd_density_nominal(mock_crowd_detector):
+    """Test density normalization across zero, nominal, and over-capacity limits."""
+    # Zero occupants
+    assert mock_crowd_detector.calculate_density(0, max_expected_people=20) == 0.0
+    # Half capacity
+    assert mock_crowd_detector.calculate_density(10, max_expected_people=20) == 0.5
+    # Full capacity
+    assert mock_crowd_detector.calculate_density(20, max_expected_people=20) == 1.0
+    # Over capacity (clamped to 1.0)
+    assert mock_crowd_detector.calculate_density(30, max_expected_people=20) == 1.0
+
+
+def test_crowd_detector_detect_mocked(mock_crowd_detector):
+    """Test detect() pipeline with mocked YOLO predictions and bounding box extraction."""
+    mock_box = MagicMock()
+    mock_box.conf = [MagicMock(item=lambda: 0.88)]
+    mock_box.xyxy = [MagicMock(cpu=lambda: MagicMock(numpy=lambda: MagicMock(tolist=lambda: [10.0, 20.0, 50.0, 80.0])))]
+
+    mock_res = MagicMock()
+    mock_res.boxes = [mock_box]
+    mock_crowd_detector.model.predict.return_value = [mock_res]
+
+    dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    result = mock_crowd_detector.detect(dummy_frame, conf_threshold=0.4)
+
+    assert result["count"] == 1
+    assert len(result["detections"]) == 1
+    det = result["detections"][0]
+    assert det["class_name"] == "person"
+    assert det["confidence"] == 0.88
+    assert det["box"] == [10, 20, 50, 80]
+    assert det["center"] == (30, 50)
+    assert result["density"] > 0.0
+
+
+def test_crowd_draw_detections(mock_crowd_detector):
+    """Test visual annotation drawing on dummy frame."""
+    dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    sample_result = {
+        "count": 1,
+        "boxes": [[10, 20, 50, 80]],
+        "confidences": [0.88],
+        "centers": [(30, 50)],
+        "density": 0.25,
+        "detections": [{
+            "class_name": "person",
+            "confidence": 0.88,
+            "box": [10, 20, 50, 80],
+            "center": (30, 50)
+        }]
+    }
+    annotated = mock_crowd_detector.draw_detections(dummy_frame, sample_result)
+    assert isinstance(annotated, np.ndarray)
+    assert annotated.shape == dummy_frame.shape
+
+
+def test_run_image_test_missing_file(mock_crowd_detector, tmp_path):
+    """Verify run_image_test safely returns False when target image file is missing."""
+    missing_file = tmp_path / "nonexistent_crowd.jpg"
+    out_file = tmp_path / "out_crowd.jpg"
+    success = run_image_test(mock_crowd_detector, missing_file, out_file, conf=0.4)
+    assert success is False
+
+
+def test_run_image_test_valid_file(mock_crowd_detector, tmp_path):
+    """Verify run_image_test processes valid image, saves output, and returns True."""
+    in_file = tmp_path / "test_crowd.jpg"
+    out_file = tmp_path / "out_crowd.jpg"
+    cv2.imwrite(str(in_file), np.zeros((100, 100, 3), dtype=np.uint8))
+
+    mock_crowd_detector.detect = MagicMock(return_value={
+        "count": 0,
+        "boxes": [],
+        "confidences": [],
+        "centers": [],
+        "density": 0.0,
+        "detections": []
+    })
+    mock_crowd_detector.draw_detections = MagicMock(return_value=np.zeros((100, 100, 3), dtype=np.uint8))
+
+    success = run_image_test(mock_crowd_detector, in_file, out_file, conf=0.4)
+    assert success is True
+    assert out_file.exists()
 
 
 if __name__ == "__main__":

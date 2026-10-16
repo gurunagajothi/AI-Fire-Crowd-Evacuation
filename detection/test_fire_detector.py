@@ -12,7 +12,10 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 import cv2
+import numpy as np
+import pytest
 
 # Add project root to sys.path so config and detection packages are discoverable
 project_root = Path(__file__).resolve().parent.parent
@@ -23,8 +26,9 @@ from config.config import CONF_THRESHOLD_FIRE, OUTPUT_DIR, DATA_DIR
 from detection.fire_detector import FireSmokeDetector
 
 
-def test_image(detector: FireSmokeDetector, image_path: Path, output_path: Path, conf: float):
+def run_image_test(detector: FireSmokeDetector, image_path: Path, output_path: Path, conf: float):
     """Run detection on a single image and save the annotated result."""
+
     print(f"\n[+] Testing Image: {image_path}")
     if not image_path.exists():
         print(f"[!] Error: Image file not found at: {image_path}")
@@ -84,7 +88,7 @@ def test_image(detector: FireSmokeDetector, image_path: Path, output_path: Path,
     return True
 
 
-def test_video(detector: FireSmokeDetector, video_path: Path, output_path: Path, conf: float):
+def run_video_test(detector: FireSmokeDetector, video_path: Path, output_path: Path, conf: float):
     """Run detection on a video file and save the annotated output video."""
     print(f"\n[+] Testing Video: {video_path}")
     if not video_path.exists():
@@ -132,7 +136,7 @@ def test_video(detector: FireSmokeDetector, video_path: Path, output_path: Path,
     return True
 
 
-def test_webcam(detector: FireSmokeDetector, device_idx: int = 0, conf: float = 0.35):
+def run_webcam_test(detector: FireSmokeDetector, device_idx: int = 0, conf: float = 0.35):
     """Run live detection from a connected webcam."""
     print(f"\n[+] Starting Live Webcam Test on device index: {device_idx}")
     print("[*] Press 'q' in the window to quit live detection.")
@@ -219,28 +223,128 @@ def main():
 
     # Determine execution mode
     if args.webcam:
-        test_webcam(detector, device_idx=0, conf=args.conf)
+        run_webcam_test(detector, device_idx=0, conf=args.conf)
     elif args.video:
         in_path = Path(args.video)
         out_path = Path(args.output) if args.output else OUTPUT_DIR / f"annotated_{in_path.stem}.mp4"
-        test_video(detector, in_path, out_path, conf=args.conf)
+        run_video_test(detector, in_path, out_path, conf=args.conf)
     elif args.image:
         in_path = Path(args.image)
         out_path = Path(args.output) if args.output else OUTPUT_DIR / f"annotated_{in_path.stem}.jpg"
-        test_image(detector, in_path, out_path, conf=args.conf)
+        run_image_test(detector, in_path, out_path, conf=args.conf)
     else:
         # Default behavior: test on sample images in data/test/ if available
         sample_path = DATA_DIR / "test" / "fire_sample.jpg"
         if sample_path.exists():
             print("[*] No test source specified. Testing on default sample image...")
             out_path = OUTPUT_DIR / "annotated_fire_sample.jpg"
-            test_image(detector, sample_path, out_path, conf=args.conf)
+            run_image_test(detector, sample_path, out_path, conf=args.conf)
         else:
             print("[*] No test input specified and no default sample found.")
             print("[*] Usage examples:")
             print("    python detection/test_fire_detector.py --image data/test/fire_sample.jpg")
             print("    python detection/test_fire_detector.py --video data/test/sample_video.mp4")
             print("    python detection/test_fire_detector.py --webcam")
+
+
+# =============================================================================
+# Pytest Unit Test Suite (Mocked weights, no webcam requirement, fast CPU tests)
+# =============================================================================
+
+@pytest.fixture
+def mock_fire_detector():
+    """Pytest fixture providing a FireSmokeDetector instance with mocked YOLO model."""
+    with patch.object(FireSmokeDetector, "_ensure_model_exists"), \
+         patch("detection.fire_detector.YOLO") as mock_yolo_cls:
+        mock_model = MagicMock()
+        mock_model.names = {0: "smoke", 1: "fire"}
+        mock_yolo_cls.return_value = mock_model
+        detector = FireSmokeDetector()
+        detector.model = mock_model
+        detector.classes = {0: "smoke", 1: "fire"}
+        return detector
+
+
+def test_fire_hazard_score_nominal(mock_fire_detector):
+    """Test hazard score calculation across zero, smoke, fire, and multi-hazard detections."""
+    # Zero detections -> 0.0
+    assert mock_fire_detector.calculate_hazard_score([]) == 0.0
+
+    # Smoke detection (0.4 + 0.3 * conf)
+    smoke_det = [{"class_name": "smoke", "confidence": 0.5, "box": [0, 0, 10, 10]}]
+    smoke_score = mock_fire_detector.calculate_hazard_score(smoke_det)
+    assert 0.4 <= smoke_score <= 0.8
+    assert smoke_score == round(0.4 + 0.3 * 0.5, 3)
+
+    # Fire detection (0.7 + 0.3 * conf)
+    fire_det = [{"class_name": "fire", "confidence": 0.9, "box": [0, 0, 10, 10]}]
+    fire_score = mock_fire_detector.calculate_hazard_score(fire_det)
+    assert 0.7 <= fire_score <= 1.0
+    assert fire_score == round(min(1.0, 0.7 + 0.3 * 0.9), 3)
+
+    # Multi-hazard prioritizes maximum danger
+    multi_det = [
+        {"class_name": "smoke", "confidence": 0.6, "box": [0, 0, 10, 10]},
+        {"class_name": "fire", "confidence": 0.8, "box": [20, 20, 50, 50]}
+    ]
+    multi_score = mock_fire_detector.calculate_hazard_score(multi_det)
+    assert multi_score == round(0.7 + 0.3 * 0.8, 3)
+
+
+def test_fire_detector_detect_mocked(mock_fire_detector):
+    """Test detect() pipeline with mocked YOLO hazard detection predictions."""
+    mock_box = MagicMock()
+    mock_box.cls = [MagicMock(item=lambda: 1)]
+    mock_box.conf = [MagicMock(item=lambda: 0.92)]
+    mock_box.xyxy = [MagicMock(cpu=lambda: MagicMock(numpy=lambda: MagicMock(tolist=lambda: [15.0, 25.0, 60.0, 90.0])))]
+
+    mock_res = MagicMock()
+    mock_res.boxes = [mock_box]
+    mock_fire_detector.model.predict.return_value = [mock_res]
+
+    dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    detections = mock_fire_detector.detect(dummy_frame, conf_threshold=0.4)
+
+    assert len(detections) == 1
+    assert detections[0]["class_name"] == "fire"
+    assert detections[0]["confidence"] == 0.92
+    assert detections[0]["box"] == [15, 25, 60, 90]
+
+
+def test_fire_draw_detections(mock_fire_detector):
+    """Test visual annotation drawing on dummy frame."""
+    dummy_frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    sample_dets = [{
+        "class_name": "fire",
+        "confidence": 0.92,
+        "box": [15, 25, 60, 90],
+        "class_id": 1
+    }]
+    annotated = mock_fire_detector.draw_detections(dummy_frame, sample_dets)
+    assert isinstance(annotated, np.ndarray)
+    assert annotated.shape == dummy_frame.shape
+
+
+def test_run_image_test_missing_file(mock_fire_detector, tmp_path):
+    """Verify run_image_test safely returns False when target image file is missing."""
+    missing_file = tmp_path / "nonexistent_fire.jpg"
+    out_file = tmp_path / "out_fire.jpg"
+    success = run_image_test(mock_fire_detector, missing_file, out_file, conf=0.4)
+    assert success is False
+
+
+def test_run_image_test_valid_file(mock_fire_detector, tmp_path):
+    """Verify run_image_test processes valid image, saves output, and returns True."""
+    in_file = tmp_path / "test_fire.jpg"
+    out_file = tmp_path / "out_fire.jpg"
+    cv2.imwrite(str(in_file), np.zeros((100, 100, 3), dtype=np.uint8))
+
+    mock_fire_detector.detect = MagicMock(return_value=[])
+    mock_fire_detector.draw_detections = MagicMock(return_value=np.zeros((100, 100, 3), dtype=np.uint8))
+
+    success = run_image_test(mock_fire_detector, in_file, out_file, conf=0.4)
+    assert success is True
+    assert out_file.exists()
 
 
 if __name__ == "__main__":

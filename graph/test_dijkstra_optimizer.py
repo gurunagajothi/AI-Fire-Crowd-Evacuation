@@ -127,5 +127,11 @@ def run_dynamic_dijkstra_simulation():
     return True
 
 
+def test_dynamic_dijkstra_simulation():
+    """Pytest unit test verifying dynamic Dijkstra execution and emergency rerouting."""
+    success = run_dynamic_dijkstra_simulation()
+    assert success is True
+
+
 if __name__ == "__main__":
     run_dynamic_dijkstra_simulation()

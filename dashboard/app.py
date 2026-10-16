@@ -97,6 +97,10 @@ class BrowserWebcamProcessor(VideoProcessorBase):
 
 try:
     from dashboard.components import (
+        render_simple_header,
+        render_evacuation_guidance_card,
+        render_detection_summary_cards,
+        render_academic_disclaimer,
         render_header,
         render_system_status_bar,
         render_cctv_meta_bar,
@@ -137,9 +141,14 @@ try:
         generate_incident_report_json,
         generate_incident_report_csv,
         render_prototype_notes,
+        render_academic_limitations,
     )
 except (ImportError, ModuleNotFoundError):
     from components import (
+        render_simple_header,
+        render_evacuation_guidance_card,
+        render_detection_summary_cards,
+        render_academic_disclaimer,
         render_header,
         render_system_status_bar,
         render_cctv_meta_bar,
@@ -180,6 +189,7 @@ except (ImportError, ModuleNotFoundError):
         generate_incident_report_json,
         generate_incident_report_csv,
         render_prototype_notes,
+        render_academic_limitations,
     )
 
 
@@ -187,7 +197,7 @@ except (ImportError, ModuleNotFoundError):
 # STREAMLIT PAGE CONFIGURATION & STYLING INJECTION
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="AI Evacuation Command Center — IEEE Prototype",
+    page_title="AI Evacuation Assistant",
     page_icon="🚨",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -939,512 +949,154 @@ def get_standby_baseline_result(
 
 
 # -----------------------------------------------------------------------------
-# MAIN APPLICATION
+# 1. SECTION RENDERERS (CLEAN, MODULAR, COMPLETE FEATURE PRESERVATION)
 # -----------------------------------------------------------------------------
-def main():
-    # Load Core Engines and verify class & instance compatibility
-    _ensure_fresh_system_modules()
-    system, init_err = get_system()
-    if init_err:
-        st.error(f"[!] System Engine Initialization Failed: {init_err}")
-        return
-    system = _ensure_compatible_system_instance(system)
 
-    multi_floor_model = get_multi_floor_model()
-    assistant = get_decision_assistant()
+def _render_home_section(system, active_result, source_room, active_edge):
+    """
+    Renders the simple, clean, and inviting Home landing screen.
+    Directly answers 'What do you want to analyze?' with clear entry points.
+    """
+    st.markdown("""
+    <div style="text-align: center; margin: 12px 0 28px 0;">
+        <h2 style="font-size: 1.75rem; font-weight: 700; color: var(--text-primary); margin-bottom: 8px;">
+            What do you want to analyze?
+        </h2>
+        <p style="color: var(--text-muted); font-size: 1.05rem; margin: 0; max-width: 600px; margin-left: auto; margin-right: auto; line-height: 1.5;">
+            Select a surveillance source below to detect fire/smoke hazards, monitor occupant congestion, and compute dynamic evacuation paths.
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
 
-    now_ts = datetime.datetime.now().strftime("%H:%M:%S")
+    # Two large, elegant primary action cards
+    col_img, col_vid = st.columns(2)
 
-    # -------------------------------------------------------------------------
-    # SESSION STATE INITIALIZATION
-    # -------------------------------------------------------------------------
-    if "camera_simulator" not in st.session_state:
-        st.session_state.camera_simulator = MultiCameraSimulator()
-    if "hazard_tracker" not in st.session_state:
-        st.session_state.hazard_tracker = TemporalHazardTracker()
-    if "video_stream" not in st.session_state:
-        st.session_state.video_stream = None
-    if "monitoring_active" not in st.session_state:
-        st.session_state.monitoring_active = False
-    if "active_sample_file" not in st.session_state:
-        st.session_state.active_sample_file = "flames_sample.jpg"
-    if "input_method" not in st.session_state:
-        st.session_state.input_method = "Upload Image"
-    if "image_eval_cache" not in st.session_state:
-        st.session_state.image_eval_cache = None
-    if "video_eval_cache" not in st.session_state:
-        st.session_state.video_eval_cache = None
-    if "discovered_cameras" not in st.session_state:
-        st.session_state.discovered_cameras = None
-    if "last_camera_error" not in st.session_state:
-        st.session_state.last_camera_error = ""
-    if "run_benchmark_active" not in st.session_state:
-        st.session_state.run_benchmark_active = False
-    if "telemetry_history" not in st.session_state:
-        st.session_state.telemetry_history = []
-    if "incident_events" not in st.session_state:
-        st.session_state.incident_events = [
-            {"time": now_ts, "desc": "System online. Dual YOLOv8n initialized on CPU."},
-            {"time": now_ts, "desc": "Topological building digital twin loaded. Dijkstra optimizer online."},
-            {"time": now_ts, "desc": "CCTV surveillance feed initialized. Continuous perception active."}
-        ]
-
-    # -------------------------------------------------------------------------
-    # SIDEBAR CONTROLS & CONFIGURATION
-    # -------------------------------------------------------------------------
-    st.sidebar.header("⚙️ Command Center Configuration")
-
-    # Operational Mode Toggle (Feature 19)
-    op_mode = st.sidebar.radio(
-        "Operational Mode",
-        options=["RESEARCH MODE", "EMERGENCY COMMAND MODE"],
-        index=0,
-        help="Research Mode displays comprehensive telemetry, algorithms, and XAI. Emergency Mode streamlines high-visibility egress directives."
-    )
-
-    # Ingestion Source with Cloud Environment Safeguards
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📹 CCTV Feed Acquisition")
-    cloud_env = is_cloud_environment()
-
-    if cloud_env:
-        input_options = [
-            "Upload Image",
-            "Upload Video",
-            "Browser Webcam (WebRTC / Cloud)",
-            "Benchmark Test Images",
-            "CCTV Demo Video",
-        ]
-    else:
-        input_options = [
-            "Upload Image",
-            "Upload Video",
-            "Browser Webcam (WebRTC / Cloud)",
-            "Benchmark Test Images",
-            "CCTV Demo Video",
-            "Laptop Webcam",
-            "External USB Camera",
-            "RTSP Network Stream",
-        ]
-
-    # Handle legacy or migrated input selections cleanly
-    if st.session_state.input_method not in input_options:
-        if "Quick Test" in st.session_state.input_method:
-            st.session_state.input_method = "Benchmark Test Images"
-        else:
+    with col_img:
+        st.markdown("""
+        <div class="home-choice-card">
+            <div>
+                <div style="font-size: 2.75rem; margin-bottom: 10px;">🖼️</div>
+                <h3 class="home-card-title">Upload Image</h3>
+                <p class="home-card-desc">
+                    Detect active flames, smoke plumes, and occupant congestion from a single CCTV or floorplan snapshot.
+                </p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Choose Image ➔", key="home_btn_img", use_container_width=True, type="primary"):
             st.session_state.input_method = "Upload Image"
+            st.session_state.nav_section = "🔍 Analyze"
+            st.rerun()
 
-    curr_idx = input_options.index(st.session_state.input_method)
-    selected_method = st.sidebar.radio("CCTV Media Source", options=input_options, index=curr_idx)
+    with col_vid:
+        st.markdown("""
+        <div class="home-choice-card">
+            <div>
+                <div style="font-size: 2.75rem; margin-bottom: 10px;">🎬</div>
+                <h3 class="home-card-title">Upload Video</h3>
+                <p class="home-card-desc">
+                    Analyze sequential video footage for real-time hazard progression, crowd bottlenecks, and dynamic egress re-routing.
+                </p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("Choose Video ➔", key="home_btn_vid", use_container_width=True, type="primary"):
+            st.session_state.input_method = "Upload Video"
+            st.session_state.nav_section = "🔍 Analyze"
+            st.rerun()
 
-    if st.session_state.input_method != selected_method:
-        # Cleanly release any active OpenCV camera/stream when switching input modes
-        if st.session_state.video_stream is not None:
-            st.session_state.video_stream.release()
-            st.session_state.video_stream = None
-        st.session_state.monitoring_active = False
-        st.session_state.camera_simulator.unbind_stream("CAM-01")
-        st.session_state.last_camera_error = ""
-        st.session_state.input_method = selected_method
+    # Subtle Live Camera option
+    st.markdown("<div style='text-align: center; margin-top: 18px;'>", unsafe_allow_html=True)
+    c_sub1, c_sub2, c_sub3 = st.columns([1, 1.4, 1])
+    with c_sub2:
+        if st.button("📹 Or use Live Camera Feed ➔", key="home_btn_cam", use_container_width=True):
+            st.session_state.input_method = "Live Camera"
+            st.session_state.nav_section = "🔍 Analyze"
+            st.rerun()
+    st.markdown("</div>", unsafe_allow_html=True)
 
-    cam_device_idx = 0 if selected_method == "Laptop Webcam" else 1
-    rtsp_url = "rtsp://127.0.0.1:8554/live"
-    browser_cam_mode = "Live WebRTC Stream (Continuous)"
-    webrtc_auto_refresh = True
-
-    # Mode-specific sidebar controls
-    if selected_method == "Browser Webcam (WebRTC / Cloud)":
-        st.sidebar.caption(
-            "Streams video directly from your browser camera. Works on both **Streamlit Cloud** and **Local** browsers."
-        )
-        browser_modes = ["Live WebRTC Stream (Continuous)", "HTML5 Camera Capture (Firewall-Safe)"]
-        if not WEBRTC_AVAILABLE:
-            browser_modes = ["HTML5 Camera Capture (Firewall-Safe)"]
-        browser_cam_mode = st.sidebar.radio(
-            "Browser Capture Engine",
-            options=browser_modes,
-            index=0,
-            help="Use Live WebRTC for continuous streaming, or HTML5 Camera Capture if your firewall blocks WebRTC UDP."
-        )
-        if browser_cam_mode == "Live WebRTC Stream (Continuous)":
-            webrtc_auto_refresh = st.sidebar.checkbox(
-                "Continuous AI Telemetry Refresh",
-                value=True,
-                help="Automatically re-evaluates incoming WebRTC frames through Dual YOLOv8 and Dynamic Dijkstra."
-            )
-
-    elif selected_method in ["Laptop Webcam", "External USB Camera"]:
-        if cloud_env:
-            st.sidebar.warning(
-                "☁️ **Streamlit Cloud Detected**: Server-side OpenCV (`cv2.VideoCapture`) runs on a remote cloud container and cannot access your physical camera. "
-                "Please select **Browser Webcam (WebRTC / Cloud)** above."
-            )
-        else:
-            if st.sidebar.button("🔍 Scan Local Cameras (0–5)", use_container_width=True):
-                with st.sidebar.spinner("Probing camera indices 0–5..."):
-                    st.session_state.discovered_cameras = discover_available_cameras(max_index=5)
-                    st.session_state.last_camera_error = ""
-
-            discovered = st.session_state.discovered_cameras
-            default_idx = 0 if selected_method == "Laptop Webcam" else 1
-
-            if discovered is not None:
-                if len(discovered) > 0:
-                    cam_options = {
-                        f"Index {c['index']} — {c['resolution']} ({c['backend']})": int(c["index"])
-                        for c in discovered
-                    }
-                    option_labels = list(cam_options.keys())
-                    preferred_label_idx = 0
-                    if selected_method == "External USB Camera":
-                        for idx_pos, c in enumerate(discovered):
-                            if int(c["index"]) >= 1:
-                                preferred_label_idx = idx_pos
-                                break
-                    selected_cam_label = st.sidebar.selectbox(
-                        "Detected Local Cameras",
-                        options=option_labels,
-                        index=preferred_label_idx,
-                        help="Select a verified local camera discovered by OpenCV."
-                    )
-                    default_idx = cam_options[selected_cam_label]
-                else:
-                    st.sidebar.warning("⚠️ No active cameras responded on indices 0–5.")
-
-            cam_device_idx = int(
-                st.sidebar.number_input(
-                    "Camera Device Index (0–5)",
-                    min_value=0,
-                    max_value=5,
-                    value=int(default_idx),
-                    help="Index 0 is built-in laptop webcam; indices 1–5 are USB/virtual cameras."
-                )
-            )
-
-    elif selected_method == "RTSP Network Stream":
-        rtsp_url = st.sidebar.text_input("RTSP Stream URL", value="rtsp://127.0.0.1:8554/live", help="Format: rtsp://username:password@ip:port/stream")
-
-    # Live Stream Monitoring Controls (for continuous streaming modes only)
-    if selected_method in ["CCTV Demo Video", "Laptop Webcam", "External USB Camera", "RTSP Network Stream"]:
-        st.sidebar.markdown("**Live Stream Monitoring Controls**")
-        mon_col1, mon_col2 = st.sidebar.columns(2)
-        with mon_col1:
-            if st.button("▶ START", use_container_width=True):
-                target_src: Any = 0
-                if selected_method == "CCTV Demo Video":
-                    target_src = str(DATA_DIR / "test" / "demo_cctv_feed.mp4")
-                elif selected_method in ["Laptop Webcam", "External USB Camera"]:
-                    target_src = int(cam_device_idx)
-                elif selected_method == "RTSP Network Stream":
-                    target_src = rtsp_url.strip()
-
-                if st.session_state.video_stream is not None:
-                    st.session_state.video_stream.release()
-                    st.session_state.video_stream = None
-
-                stream = VideoStreamHandler(source=target_src)
-                if stream.start_stream():
-                    st.session_state.video_stream = stream
-                    st.session_state.monitoring_active = True
-                    st.session_state.last_camera_error = ""
-                    st.session_state.camera_simulator.bind_stream("CAM-01", stream)
-                    st.sidebar.success(f"Connected: {stream.source_type}")
-                    st.rerun()
-                else:
-                    st.session_state.monitoring_active = False
-                    st.session_state.video_stream = None
-                    err_detail = stream.error_message
-                    if isinstance(target_src, int) and not cloud_env:
-                        avail = discover_available_cameras(max_index=5)
-                        st.session_state.discovered_cameras = avail
-                        if avail:
-                            found_str = ", ".join(f"Index {c['index']} ({c['backend']}, {c['resolution']})" for c in avail)
-                            err_detail = f"{err_detail} | Detected indices: {found_str}."
-                    st.session_state.last_camera_error = err_detail
-                    st.sidebar.error(f"Connection Failed: {err_detail}")
-
-        with mon_col2:
-            if st.button("⏹ STOP", use_container_width=True):
-                if st.session_state.video_stream is not None:
-                    st.session_state.video_stream.release()
-                    st.session_state.video_stream = None
-                st.session_state.monitoring_active = False
-                st.session_state.last_camera_error = ""
-                st.session_state.camera_simulator.unbind_stream("CAM-01")
-                st.sidebar.info("Monitoring halted.")
-                st.rerun()
-
-        if st.session_state.last_camera_error and not st.session_state.monitoring_active and selected_method in ["Laptop Webcam", "External USB Camera", "RTSP Network Stream", "CCTV Demo Video"]:
-            st.sidebar.error(f"Diagnostic: {st.session_state.last_camera_error}")
-
-        if st.session_state.monitoring_active and st.session_state.video_stream is not None:
-            v_tel = st.session_state.video_stream.get_telemetry()
-            st.sidebar.markdown(f"""
-            <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid #10B981; border-radius: 6px; padding: 6px 10px; margin-top: 6px; font-size: 0.8rem; color: #34D399;">
-                🟢 <strong>RUNNING:</strong> {v_tel['source_type']}<br>
-                Backend: <strong>{v_tel.get('backend', 'AUTO')}</strong> &bull; FPS: <strong>{v_tel['fps']}</strong><br>
-                Res: <strong>{v_tel['resolution']}</strong> &bull; Frames: <strong>{v_tel['frame_count']}</strong>
+    # Active evaluation banner if results exist in cache
+    has_image_cache = st.session_state.get("image_eval_cache") is not None
+    has_vid_cache = st.session_state.get("video_eval_cache") is not None
+    if has_image_cache or has_vid_cache:
+        st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
+        source_lbl = st.session_state.image_eval_cache.get("source_name") if has_image_cache else st.session_state.video_eval_cache.get("source_name")
+        res_banner_col1, res_banner_col2 = st.columns([3, 1])
+        with res_banner_col1:
+            st.markdown(f"""
+            <div style="background: var(--blue-soft); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px 18px; color: var(--primary-blue); font-size: 0.95rem;">
+                📊 <strong>Active Evaluation Available:</strong> Results for <code>{source_lbl}</code> are ready to view.
             </div>
             """, unsafe_allow_html=True)
+        with res_banner_col2:
+            if st.button("View Results ➔", key="home_view_res", use_container_width=True, type="primary"):
+                st.session_state.nav_section = "📊 Results"
+                st.rerun()
 
-    # Dynamic Occupant Origin Room from Building Graph
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("📍 Occupant Origin Room")
-    graph = system.building_graph.get_graph()
-    graph_rooms = sorted(list(dict.fromkeys([
-        n for n, d in graph.nodes(data=True)
-        if d.get("node_type") == "ROOM" or str(n).startswith("ROOM_")
-    ])))
-    if not graph_rooms:
-        graph_rooms = ["ROOM_A", "ROOM_B", "ROOM_C"]
+    # Three core capability highlights
+    st.markdown("<div style='margin-top: 36px;'></div>", unsafe_allow_html=True)
+    st.markdown("<h4 style='font-size: 1.1rem; font-weight: 700; color: var(--text-primary); margin-bottom: 14px;'>Core AI System Capabilities</h4>", unsafe_allow_html=True)
+    f1, f2, f3 = st.columns(3)
+    with f1:
+        st.markdown("""
+        <div class="clean-metric-card" style="text-align: left; height: 100%;">
+            <div style="font-size: 1.6rem; margin-bottom: 8px;">⚡</div>
+            <div style="font-weight: 700; color: var(--text-primary); font-size: 1rem; margin-bottom: 6px;">Dual YOLOv8 Perception</div>
+            <div style="font-size: 0.88rem; color: var(--text-muted); line-height: 1.5;">
+                Dual neural models detect flame boundaries, smoke clouds, and occupant count simultaneously with sub-second CPU latency.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with f2:
+        st.markdown("""
+        <div class="clean-metric-card" style="text-align: left; height: 100%;">
+            <div style="font-size: 1.6rem; margin-bottom: 8px;">🧠</div>
+            <div style="font-weight: 700; color: var(--text-primary); font-size: 1rem; margin-bottom: 6px;">Dynamic Dijkstra Routing</div>
+            <div style="font-size: 0.88rem; color: var(--text-muted); line-height: 1.5;">
+                Optimizes escape paths dynamically by fusing physical distance (γ), fire/smoke severity (α), and crowd density (β).
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with f3:
+        st.markdown("""
+        <div class="clean-metric-card" style="text-align: left; height: 100%;">
+            <div style="font-size: 1.6rem; margin-bottom: 8px;">🛡️</div>
+            <div style="font-weight: 700; color: var(--text-primary); font-size: 1rem; margin-bottom: 6px;">Fail-Safe Exit Guidance</div>
+            <div style="font-size: 0.88rem; color: var(--text-muted); line-height: 1.5;">
+                Instantly diverts evacuees away from compromised exits, updating building digital signs and public address advisories.
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    source_room = st.sidebar.selectbox(
-        "Active Origin Room",
-        options=graph_rooms,
-        index=0,
-        help="Occupant starting room in building digital twin."
-    )
 
-    # Dynamic Primary Monitored Edge with Descriptive Annotations
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🎯 Primary Monitored Edge")
-    edge_descriptions = {
-        ("CORRIDOR_1", "EXIT_A"): "CORRIDOR_1 <-> EXIT_A (North Exit Corridor — Default Demo Zone)",
-        ("CORRIDOR_2", "EXIT_B"): "CORRIDOR_2 <-> EXIT_B (South Exit Corridor)",
-        ("CORRIDOR_1", "CORRIDOR_2"): "CORRIDOR_1 <-> CORRIDOR_2 (Central Hallway Crossway)",
-        ("ROOM_A", "CORRIDOR_1"): "ROOM_A <-> CORRIDOR_1 (Room A Access Corridor)",
-        ("ROOM_B", "CORRIDOR_1"): "ROOM_B <-> CORRIDOR_1 (Room B North Corridor)",
-        ("ROOM_B", "CORRIDOR_2"): "ROOM_B <-> CORRIDOR_2 (Room B South Corridor)",
-        ("ROOM_C", "CORRIDOR_2"): "ROOM_C <-> CORRIDOR_2 (Room C Access Corridor)",
-    }
-    mon_options = list(edge_descriptions.values())
-    monitored_edge_label = st.sidebar.selectbox(
-        "Monitored Corridor Zone (Demo Mapping)",
-        options=mon_options,
-        index=0
-    )
-    edge_lookup = {v: k for k, v in edge_descriptions.items()}
-    active_edge = edge_lookup.get(monitored_edge_label, ("CORRIDOR_1", "EXIT_A"))
+def _render_analyze_section(system, source_room, active_edge, conf_threshold, vulnerable_priority, vuln_category, enable_frame_skip, frame_skip_val, cloud_env, now_ts):
+    """Renders the media analysis workspace for Image, Video, and Live Camera."""
+    st.markdown('<div class="section-header">SURVEILLANCE ANALYSIS WORKSPACE</div>', unsafe_allow_html=True)
 
-    # Detection Confidence Threshold Slider (Feature 17)
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("🔍 Sensitivity & Threshold Control")
-    conf_threshold = st.sidebar.slider(
-        "Detection Confidence Threshold",
-        min_value=0.10,
-        max_value=0.90,
-        value=0.35,
-        step=0.05
-    )
-    system.fire_detector.conf_threshold = conf_threshold
-    system.crowd_detector.conf_threshold = conf_threshold
+    # Segmented mode selector
+    sub_modes = ["Upload Image", "Upload Video", "Live Camera"]
+    curr_method = st.session_state.get("input_method", "Upload Image")
+    default_sub_idx = 0
+    if curr_method == "Upload Video":
+        default_sub_idx = 1
+    elif curr_method in ["Live Camera", "Browser Webcam (WebRTC / Cloud)", "Laptop Webcam", "External USB Camera", "RTSP Network Stream"]:
+        default_sub_idx = 2
 
-    if conf_threshold < 0.30:
-        sens_label, sens_col = "HIGH SENSITIVITY", "#EF4444"
-    elif conf_threshold <= 0.55:
-        sens_label, sens_col = "MEDIUM SENSITIVITY", "#FBBF24"
-    else:
-        sens_label, sens_col = "LOW SENSITIVITY", "#10B981"
-    st.sidebar.markdown(f"Sensitivity: <strong style='color:{sens_col};'>{sens_label}</strong>", unsafe_allow_html=True)
-
-    # Vulnerable Occupant Priority Simulation (Feature 7)
-    st.sidebar.markdown("---")
-    st.sidebar.subheader("♿ Vulnerable Occupant Simulation")
-    vulnerable_priority = st.sidebar.checkbox("Enable Vulnerable Priority Egress", value=False)
-    vuln_category = st.sidebar.selectbox("Assistance Profile", options=["Mobility Assistance (Wheelchair)", "Elderly Occupant", "Child Group"], index=0)
-    if vulnerable_priority:
-        system.optimizer.beta = BETA + 1.5
-    else:
-        system.optimizer.beta = BETA
-
-    # CPU Frame-Skip Sampling (Only applicable for video / live stream sources)
-    is_video_input = selected_method in [
-        "Upload Video",
-        "CCTV Demo Video",
-        "Browser Webcam (WebRTC / Cloud)",
-        "Laptop Webcam",
-        "External USB Camera",
-        "RTSP Network Stream"
-    ]
-    enable_frame_skip = True
-    frame_skip_val = PROCESS_EVERY_N_FRAMES
-    if is_video_input:
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("⚡ CPU Frame-Skip Sampling")
-        enable_frame_skip = st.sidebar.checkbox(
-            "Enable Frame-Skip Sampling",
-            value=True,
-            help="Reduces CPU load by processing every N-th frame during video playback."
-        )
-        frame_skip_val = st.sidebar.slider(
-            "Sample Every N Frames",
-            min_value=1,
-            max_value=15,
-            value=PROCESS_EVERY_N_FRAMES,
-            help="Higher values increase video throughput by skipping intermediate frames."
-        )
+    chosen_sub = st.radio("Select Analysis Type", options=sub_modes, index=default_sub_idx, horizontal=True, label_visibility="collapsed")
+    st.session_state.input_method = chosen_sub
 
     # -------------------------------------------------------------------------
-    # TOP HEADER & SYSTEM STATUS BAR (Section 1)
+    # WORKFLOW A: UPLOAD IMAGE
     # -------------------------------------------------------------------------
-    render_header(mode=op_mode)
-    render_system_status_bar()
-
-    # -------------------------------------------------------------------------
-    # QUICK DEMO SCENARIO CONTROLLER (Feature 22)
-    # -------------------------------------------------------------------------
-    st.markdown('<div class="section-header">Academic Demo Scenario Controller</div>', unsafe_allow_html=True)
-    sc_c1, sc_c2, sc_c3, sc_c4, sc_c5, sc_c6 = st.columns(6)
-    with sc_c1:
-        if st.button("🟢 01 NORMAL", use_container_width=True):
-            st.session_state.active_sample_file = "normal_sample.jpg"
-            st.session_state.input_method = "Benchmark Test Images"
-            st.session_state.run_benchmark_active = False
-            img_p = DATA_DIR / "test" / "normal_sample.jpg"
-            if img_p.exists():
-                res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
-                if res_demo is not None:
-                    st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "normal_sample.jpg"}
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 01 NORMAL activated: Clear baseline."})
-            st.rerun()
-    with sc_c2:
-        if st.button("💨 02 SMOKE", use_container_width=True):
-            st.session_state.active_sample_file = "fire_sample.jpg"
-            st.session_state.input_method = "Benchmark Test Images"
-            st.session_state.run_benchmark_active = False
-            img_p = DATA_DIR / "test" / "fire_sample.jpg"
-            if img_p.exists():
-                res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
-                if res_demo is not None:
-                    st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "fire_sample.jpg"}
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 02 SMOKE activated: Smoke plume detected."})
-            st.rerun()
-    with sc_c3:
-        if st.button("🔥 03 FIRE", use_container_width=True):
-            st.session_state.active_sample_file = "flames_sample.jpg"
-            st.session_state.input_method = "Benchmark Test Images"
-            st.session_state.run_benchmark_active = False
-            img_p = DATA_DIR / "test" / "flames_sample.jpg"
-            if img_p.exists():
-                res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
-                if res_demo is not None:
-                    st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "flames_sample.jpg"}
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 03 FIRE activated: Active flames detected."})
-            st.rerun()
-    with sc_c4:
-        if st.button("👥 04 HIGH CROWD", use_container_width=True):
-            st.session_state.active_sample_file = "crowd_sample.jpg"
-            st.session_state.input_method = "Benchmark Test Images"
-            st.session_state.run_benchmark_active = False
-            img_p = DATA_DIR / "test" / "crowd_sample.jpg"
-            if img_p.exists():
-                res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
-                if res_demo is not None:
-                    st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "crowd_sample.jpg"}
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 04 HIGH CROWD activated: Congestion bottleneck."})
-            st.rerun()
-    with sc_c5:
-        if st.button("⚡ 05 COMPOUND", use_container_width=True):
-            st.session_state.active_sample_file = "compound_sample.jpg"
-            st.session_state.input_method = "Benchmark Test Images"
-            st.session_state.run_benchmark_active = False
-            img_p = DATA_DIR / "test" / "compound_sample.jpg"
-            if img_p.exists():
-                res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
-                if res_demo is not None:
-                    st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "compound_sample.jpg"}
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 05 COMPOUND activated: Simultaneous fire + crowd."})
-            st.rerun()
-    with sc_c6:
-        if st.button("▶ RUN FULL DEMO", use_container_width=True):
-            st.session_state.run_benchmark_active = True
-
-    # Advanced Scenarios Sub-Bar
-    adv_c1, adv_c2, adv_c3, adv_c4, adv_c5 = st.columns(5)
-    with adv_c1:
-        if st.button("📹 06 CAMERA OCCLUSION", use_container_width=True):
-            st.session_state.camera_simulator.update_camera_telemetry(cam_id="CAM-01", fire_detected=False, smoke_detected=False, hazard_score=0.0, people_count=0, crowd_density=0.0, coverage="UNAVAILABLE", occlusion="HIGH")
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 06: Camera occlusion on CAM-01 triggered coverage uncertainty."})
-            st.rerun()
-    with adv_c2:
-        if st.button("🚫 07 EXIT BLOCKED", use_container_width=True):
-            st.session_state.active_sample_file = "flames_sample.jpg"
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 07: EXIT_A access corridor blocked."})
-            st.rerun()
-    with adv_c3:
-        if st.button("🔥 08 MULTI-ZONE HAZARD", use_container_width=True):
-            st.session_state.camera_simulator.update_camera_telemetry(cam_id="CAM-01", fire_detected=True, smoke_detected=False, hazard_score=0.88, people_count=2, crowd_density=0.1, sample_file="flames_sample.jpg")
-            st.session_state.camera_simulator.update_camera_telemetry(cam_id="CAM-02", fire_detected=False, smoke_detected=True, hazard_score=0.65, people_count=5, crowd_density=0.3, sample_file="fire_sample.jpg")
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 08: Multi-zone hazard across CAM-01 and CAM-02."})
-            st.rerun()
-    with adv_c4:
-        if st.button("👥 09 CROWD + SMOKE", use_container_width=True):
-            st.session_state.active_sample_file = "compound_sample.jpg"
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 09: Heavy occupant density fleeing smoke plume."})
-            st.rerun()
-    with adv_c5:
-        if st.button("📡 10 MULTI-CAM INCIDENT", use_container_width=True):
-            st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 10: Multi-camera synchronized surveillance incident."})
-            st.rerun()
-
-    # Sequential Benchmark Sweep Execution
-    if st.session_state.run_benchmark_active:
-        st.markdown("#### Sequential Benchmark Sweep Results (5 IEEE Scenarios)")
-        scenarios = [
-            ("01 NORMAL", "normal_sample.jpg"),
-            ("02 SMOKE", "fire_sample.jpg"),
-            ("03 FIRE", "flames_sample.jpg"),
-            ("04 HIGH CROWD", "crowd_sample.jpg"),
-            ("05 COMPOUND", "compound_sample.jpg")
-        ]
-        b_res = []
-        p_bar = st.progress(0.0)
-        for i, (sc_name, sc_img) in enumerate(scenarios):
-            img_p = DATA_DIR / "test" / sc_img
-            if img_p.exists():
-                b_frame = cv2.imread(str(img_p))
-                t0_b = time.time()
-                res = system.process_frame(b_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
-                ensure_complete_emergency_state(system=system, result=res, source_room=source_room, active_edge=active_edge)
-                dt_b = (time.time() - t0_b) * 1000.0
-                b_res.append({
-                    "Scenario": sc_name,
-                    "Fire": "YES" if res["fire_detected"] else "NO",
-                    "Smoke": "YES" if res["smoke_detected"] else "NO",
-                    "People": res["people_detected"],
-                    "Density": f"{res['crowd_density']:.3f}",
-                    "Hazard": f"{res['hazard_score']:.3f}",
-                    "Dynamic Exit": res["recommended_exit"],
-                    "Route": res["recommended_route_str"],
-                    "Total Cost": f"{res['total_route_cost']:.2f}",
-                    "Latency": f"{dt_b:.1f} ms"
-                })
-            p_bar.progress((i + 1) / len(scenarios))
-            time.sleep(0.04)
-        st.dataframe(pd.DataFrame(b_res), hide_index=True, use_container_width=True)
-        st.success("✅ **BENCHMARK COMPLETE**: All 5 sequential scenarios evaluated successfully via real dual YOLO perception and Dynamic Dijkstra!")
-
-    # -------------------------------------------------------------------------
-    # MEDIA INGESTION & EVALUATION WORKFLOW CARDS
-    # -------------------------------------------------------------------------
-    raw_preview_frame: Optional[np.ndarray] = None
-    target_img_name: str = "custom_image"
-    target_vid_name: str = "demo_cctv_feed.mp4"
-    webrtc_playing_active = False
-    is_video_mode = False
-    media_source_description = ""
-
-    # WORKFLOW 1: Upload Image (Explicit Gated Evaluation)
-    if selected_method == "Upload Image":
-        st.markdown('<div class="section-header">SURVEILLANCE IMAGE EVALUATION WORKFLOW</div>', unsafe_allow_html=True)
-        st.caption("Upload a floorplan / CCTV snapshot (JPG, PNG, BMP) or choose a benchmark sample. Click **Evaluate Image** to run Dual YOLOv8 fire/smoke + crowd perception and Dynamic Dijkstra egress optimization.")
+    if chosen_sub == "Upload Image":
+        st.caption("Upload a surveillance image (JPG, PNG) or select a benchmark sample. Click **ANALYZE IMAGE** to run Dual YOLOv8 perception and Dynamic Dijkstra routing.")
 
         img_col1, img_col2 = st.columns([1.2, 1.0])
         with img_col1:
             up_img_file = st.file_uploader(
-                "Upload Surveillance Image",
+                "Upload Image File",
                 type=["jpg", "jpeg", "png", "bmp"],
-                key="img_eval_uploader",
+                key="clean_img_uploader",
                 help="Accepts JPG, JPEG, PNG, BMP images."
             )
         with img_col2:
@@ -1452,13 +1104,14 @@ def main():
                 "None (Use Uploaded Image)",
                 "flames_sample.jpg (Active Fire Hazard)",
                 "fire_sample.jpg (Smoke Plume Hazard)",
-                "crowd_sample.jpg (Occupant Bottleneck)",
+                "crowd_sample.jpg (High Density Crowd)",
                 "compound_sample.jpg (Compound Fire + Crowd)",
                 "normal_sample.jpg (Nominal Facility Baseline)"
             ]
             selected_preset = st.selectbox("Or Select Benchmark Image Sample", options=preset_options, index=1 if up_img_file is None else 0)
 
         target_img_input = None
+        target_img_name = "custom_image.jpg"
         if up_img_file is not None:
             target_img_input = up_img_file
             target_img_name = up_img_file.name
@@ -1470,6 +1123,7 @@ def main():
             target_img_input = DATA_DIR / "test" / "flames_sample.jpg"
             target_img_name = "flames_sample.jpg"
 
+        raw_preview_frame = None
         decode_err = None
         if target_img_input is not None:
             if isinstance(target_img_input, (str, Path)):
@@ -1489,48 +1143,47 @@ def main():
 
         preview_c1, preview_c2 = st.columns(2)
         with preview_c1:
-            st.markdown(f"**ORIGINAL SURVEILLANCE IMAGE PREVIEW** (`{target_img_name}`)")
+            st.markdown(f"**SOURCE IMAGE PREVIEW** (`{target_img_name}`)")
             if raw_preview_frame is not None:
-                st.image(cv2.cvtColor(raw_preview_frame, cv2.COLOR_BGR2RGB), caption=f"Input Image: {target_img_name} ({raw_preview_frame.shape[1]}x{raw_preview_frame.shape[0]})", use_container_width=True)
+                st.image(cv2.cvtColor(raw_preview_frame, cv2.COLOR_BGR2RGB), caption=f"{target_img_name} ({raw_preview_frame.shape[1]}x{raw_preview_frame.shape[0]})", use_container_width=True)
             else:
                 st.info("Awaiting image upload or sample selection.")
 
-        cached_img_eval = st.session_state.image_eval_cache
+        cached_img_eval = st.session_state.get("image_eval_cache")
         has_eval_for_current = (cached_img_eval is not None and cached_img_eval.get("source_name") == target_img_name)
 
         with preview_c2:
-            st.markdown("**AI ANNOTATED PERCEPTION & EGRESS OVERLAY (Dual YOLOv8 HUD)**")
+            st.markdown("**AI ANNOTATED PERCEPTION HUD**")
             if has_eval_for_current and cached_img_eval is not None:
                 eval_ann = cached_img_eval["result"].get("annotated_frame")
                 if eval_ann is not None:
-                    st.image(cv2.cvtColor(eval_ann, cv2.COLOR_BGR2RGB), caption="Dual YOLOv8 Perception HUD & Egress Directives", use_container_width=True)
-                    is_enc, enc_buf = cv2.imencode(".png", eval_ann)
-                    if is_enc:
-                        st.download_button(
-                            label="📥 Download Annotated Image (.PNG)",
-                            data=enc_buf.tobytes(),
-                            file_name=f"annotated_{target_img_name.rsplit('.', 1)[0]}.png",
-                            mime="image/png",
-                            use_container_width=True
-                        )
+                    st.image(cv2.cvtColor(eval_ann, cv2.COLOR_BGR2RGB), caption="Dual YOLOv8 Detection HUD & Egress Directives", use_container_width=True)
             else:
                 st.markdown("""
-                <div style="background: rgba(30, 41, 59, 0.7); border: 2px dashed #475569; border-radius: 8px; padding: 40px 20px; text-align: center; color: #94A3B8;">
-                    <h4>⏳ Awaiting Evaluation</h4>
-                    <p style="margin: 0; font-size: 0.9rem;">Click the <strong>'🔍 Evaluate Image'</strong> button below to run Dual YOLOv8 fire/smoke + crowd perception and Dynamic Dijkstra routing.</p>
+                <div style="background: var(--bg-surface); border: 2px dashed var(--border-strong); border-radius: 8px; padding: 48px 20px; text-align: center; color: var(--text-muted);">
+                    <div style="font-size: 1.75rem; margin-bottom: 8px;">⏳</div>
+                    <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">Awaiting Analysis</div>
+                    <div style="font-size: 0.9rem;">Click the <strong>ANALYZE IMAGE</strong> button below to run Dual YOLOv8 & Dynamic Dijkstra routing.</div>
                 </div>
                 """, unsafe_allow_html=True)
 
-        btn_c1, btn_c2 = st.columns([2, 1])
+        btn_c1, btn_c2, btn_c3 = st.columns([2, 1, 1])
         with btn_c1:
-            eval_img_clicked = st.button("🔍 Evaluate Image", type="primary", use_container_width=True)
+            eval_img_clicked = st.button("🔍 ANALYZE IMAGE", type="primary", use_container_width=True)
         with btn_c2:
-            if st.button("🔄 Clear / Reset Cache", use_container_width=True):
+            if has_eval_for_current:
+                if st.button("👉 View Results ➔", use_container_width=True):
+                    st.session_state.nav_section = "📊 Results"
+                    st.rerun()
+            else:
+                st.button("👉 View Results ➔", use_container_width=True, disabled=True)
+        with btn_c3:
+            if st.button("🔄 Clear Cache", use_container_width=True):
                 st.session_state.image_eval_cache = None
                 st.rerun()
 
         if eval_img_clicked and raw_preview_frame is not None:
-            with st.spinner("Executing Dual YOLOv8 Detection & Dynamic Dijkstra Optimization..."):
+            with st.spinner("Executing Dual YOLOv8 Perception & Dynamic Dijkstra Router..."):
                 res_img, raw_f, err_eval = process_image_evaluation(
                     system=system,
                     image_input=raw_preview_frame,
@@ -1538,7 +1191,7 @@ def main():
                     source_room=source_room
                 )
                 if err_eval is not None:
-                    st.error(f"Evaluation Failed: {err_eval}")
+                    st.error(f"Analysis Failed: {err_eval}")
                 else:
                     st.session_state.image_eval_cache = {
                         "result": res_img,
@@ -1547,41 +1200,25 @@ def main():
                     }
                     st.session_state.incident_events.append({
                         "time": now_ts,
-                        "desc": f"Image Evaluation completed for {target_img_name}: Hazard={res_img['hazard_score']:.3f}, People={res_img['people_detected']}, Route={res_img['recommended_route_str']}."
+                        "desc": f"Image Analysis completed ({target_img_name}): Hazard={res_img['hazard_score']:.3f}, People={res_img['people_detected']}, Route={res_img['recommended_route_str']}."
                     })
-                    st.success("✅ Image Evaluation Complete!")
+                    st.session_state.nav_section = "📊 Results"
+                    st.success("✅ Analysis Complete! Navigating to Results...")
                     st.rerun()
 
-        if has_eval_for_current and cached_img_eval is not None:
-            cur_r = cached_img_eval["result"]
-            em = cur_r["emergency_state"]
-            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
-            f_conf = max([d["confidence"] for d in cur_r.get("fire_detections", []) if d.get("class_name") == "fire"] or [0.0])
-            s_conf = max([d["confidence"] for d in cur_r.get("fire_detections", []) if d.get("class_name") == "smoke"] or [0.0])
-            with mc1:
-                st.metric("🔥 Fire Detected", "YES" if em["fire_detected"] else "NO", f"Conf: {f_conf:.2f}" if em["fire_detected"] else "Nominal")
-            with mc2:
-                st.metric("💨 Smoke Detected", "YES" if em["smoke_detected"] else "NO", f"Conf: {s_conf:.2f}" if em["smoke_detected"] else "Nominal")
-            with mc3:
-                st.metric("👥 Occupant Count", f"{em['people_count']} People", f"Density: {em['crowd_density']:.2f}")
-            with mc4:
-                st.metric("⚠️ Hazard Score", f"{em['hazard_score']:.3f}", em["status_level"])
-            with mc5:
-                st.metric("🚪 Recommended Exit", em["recommended_exit"], f"Cost: {em['total_route_cost']:.2f}")
-
-    # WORKFLOW 2: Upload Video (Explicit Gated Evaluation with Frame Skipping & H.264 Export)
-    elif selected_method == "Upload Video":
-        is_video_mode = True
-        st.markdown('<div class="section-header">SURVEILLANCE VIDEO EVALUATION WORKFLOW</div>', unsafe_allow_html=True)
-        st.caption("Upload a CCTV video file (MP4, AVI, MOV, MKV) or analyze the demo CCTV surveillance feed. Configure sampling parameters and click **Evaluate Video** to perform sequential AI perception and egress optimization.")
+    # -------------------------------------------------------------------------
+    # WORKFLOW B: UPLOAD VIDEO
+    # -------------------------------------------------------------------------
+    elif chosen_sub == "Upload Video":
+        st.caption("Upload a surveillance video (MP4, AVI, MOV) or evaluate the demo corridor feed. Click **ANALYZE VIDEO** to process frames and calculate dynamic routes.")
 
         vid_col1, vid_col2 = st.columns([1.2, 1.0])
         with vid_col1:
             up_vid_file = st.file_uploader(
                 "Upload Video File",
                 type=["mp4", "avi", "mov", "mkv"],
-                key="vid_eval_uploader",
-                help="Accepts MP4, AVI, MOV, MKV formats."
+                key="clean_vid_uploader",
+                help="Accepts MP4, AVI, MOV, MKV video files."
             )
         with vid_col2:
             vid_preset_options = [
@@ -1591,6 +1228,7 @@ def main():
             selected_vid_preset = st.selectbox("Or Select Benchmark Demo Video", options=vid_preset_options, index=1 if up_vid_file is None else 0)
 
         target_vid_source = None
+        target_vid_name = "demo_cctv_feed.mp4"
         if up_vid_file is not None:
             target_vid_source = up_vid_file
             target_vid_name = up_vid_file.name
@@ -1638,12 +1276,6 @@ def main():
         with meta_c4:
             st.metric("⏱️ Duration", f"{v_meta['duration_s']} s")
 
-        set_c1, set_c2 = st.columns(2)
-        with set_c1:
-            vid_frame_skip = st.slider("Video Frame Skip Interval", min_value=1, max_value=10, value=3, help="Process every N-th frame to accelerate CPU perception throughput.")
-        with set_c2:
-            max_vid_frames = st.slider("Max Sampled Frames to Process", min_value=10, max_value=150, value=min(60, max(10, v_meta["total_frames"])), help="Limits processing duration to prevent CPU timeouts.")
-
         vid_p_c1, vid_p_c2 = st.columns(2)
         with vid_p_c1:
             st.markdown(f"**SOURCE VIDEO PREVIEW** (`{target_vid_name}`)")
@@ -1656,37 +1288,51 @@ def main():
             else:
                 st.info("Awaiting video file.")
 
-        cached_vid_eval = st.session_state.video_eval_cache
+        cached_vid_eval = st.session_state.get("video_eval_cache")
         has_vid_eval = (cached_vid_eval is not None and cached_vid_eval.get("source_name") == target_vid_name)
 
         with vid_p_c2:
-            st.markdown("**AI ANNOTATED OUTPUT VIDEO (Dual YOLOv8 HUD & Routing)**")
+            st.markdown("**AI ANNOTATED OUTPUT VIDEO (PyAV H.264)**")
             if has_vid_eval and cached_vid_eval is not None:
                 mp4_bytes = cached_vid_eval.get("mp4_bytes", b"")
                 if mp4_bytes:
                     st.video(mp4_bytes)
                     st.download_button(
-                        label="📥 Download Annotated Video (.MP4)",
+                        label="📥 Download Processed Video (.MP4)",
                         data=mp4_bytes,
                         file_name=f"annotated_{target_vid_name.rsplit('.', 1)[0]}.mp4",
                         mime="video/mp4",
                         use_container_width=True
                     )
                 else:
-                    st.info("Video processed. Keyframes available in tabs below.")
+                    st.info("Video processed. Keyframe metrics available in Results.")
             else:
                 st.markdown("""
-                <div style="background: rgba(30, 41, 59, 0.7); border: 2px dashed #475569; border-radius: 8px; padding: 40px 20px; text-align: center; color: #94A3B8;">
-                    <h4>⏳ Awaiting Evaluation</h4>
-                    <p style="margin: 0; font-size: 0.9rem;">Click the <strong>'🎬 Evaluate Video'</strong> button below to analyze frames sequentially.</p>
+                <div style="background: var(--bg-surface); border: 2px dashed var(--border-strong); border-radius: 8px; padding: 48px 20px; text-align: center; color: var(--text-muted);">
+                    <div style="font-size: 1.75rem; margin-bottom: 8px;">⏳</div>
+                    <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">Awaiting Video Processing</div>
+                    <div style="font-size: 0.9rem;">Click the <strong>ANALYZE VIDEO</strong> button below to process frames sequentially.</div>
                 </div>
                 """, unsafe_allow_html=True)
 
-        btn_v1, btn_v2 = st.columns([2, 1])
+        set_c1, set_c2 = st.columns(2)
+        with set_c1:
+            vid_frame_skip = st.slider("Frame Skip Sampling Interval", min_value=1, max_value=10, value=3, help="Process every N-th frame to accelerate CPU perception throughput.")
+        with set_c2:
+            max_vid_frames = st.slider("Max Frames to Process", min_value=10, max_value=150, value=min(60, max(10, v_meta["total_frames"])), help="Limits frames to ensure snappy CPU evaluation.")
+
+        btn_v1, btn_v2, btn_v3 = st.columns([2, 1, 1])
         with btn_v1:
-            eval_vid_clicked = st.button("🎬 Evaluate Video", type="primary", use_container_width=True)
+            eval_vid_clicked = st.button("🎬 ANALYZE VIDEO", type="primary", use_container_width=True)
         with btn_v2:
-            if st.button("🔄 Reset Video Cache", key="btn_reset_vid", use_container_width=True):
+            if has_vid_eval:
+                if st.button("👉 View Results ➔", key="vid_view_res", use_container_width=True):
+                    st.session_state.nav_section = "📊 Results"
+                    st.rerun()
+            else:
+                st.button("👉 View Results ➔", key="vid_view_res_dis", use_container_width=True, disabled=True)
+        with btn_v3:
+            if st.button("🔄 Reset Video Cache", key="clean_reset_vid", use_container_width=True):
                 st.session_state.video_eval_cache = None
                 st.rerun()
 
@@ -1697,9 +1343,9 @@ def main():
             def vid_callback(curr, total, cur_res):
                 frac = min(1.0, curr / max(1, total))
                 p_bar.progress(frac)
-                status_txt.text(f"Evaluating frame {curr}/{total} &bull; Hazard: {cur_res['hazard_score']:.3f} &bull; Exit: {cur_res['recommended_exit']}")
+                status_txt.text(f"Analyzing frame {curr}/{total} — Hazard: {cur_res['hazard_score']:.3f} — Dynamic Exit: {cur_res['recommended_exit']}")
 
-            with st.spinner("Evaluating video frames through Dual YOLOv8 (CPU) & Dynamic Dijkstra..."):
+            with st.spinner("Processing video frames through Dual YOLOv8 & Dynamic Dijkstra..."):
                 sum_vid, mp4_out, err_v = process_video_evaluation(
                     system=system,
                     video_source=probe_path,
@@ -1711,7 +1357,7 @@ def main():
                 )
 
             if err_v is not None:
-                st.error(f"Video Evaluation Failed: {err_v}")
+                st.error(f"Video Analysis Failed: {err_v}")
             else:
                 st.session_state.video_eval_cache = {
                     "summary": sum_vid,
@@ -1720,9 +1366,10 @@ def main():
                 }
                 st.session_state.incident_events.append({
                     "time": now_ts,
-                    "desc": f"Video Evaluation completed for {target_vid_name}: {sum_vid['processed_frames_count']} frames analyzed, Peak Hazard={sum_vid['peak_hazard_score']}, Exit={sum_vid['primary_recommended_exit']}."
+                    "desc": f"Video Analysis completed ({target_vid_name}): {sum_vid['processed_frames_count']} frames analyzed, Peak Hazard={sum_vid['peak_hazard_score']}, Exit={sum_vid['primary_recommended_exit']}."
                 })
-                st.success("✅ Video Evaluation Complete!")
+                st.session_state.nav_section = "📊 Results"
+                st.success("✅ Video Analysis Complete! Navigating to Results...")
                 st.rerun()
 
         if temp_probe:
@@ -1731,415 +1378,247 @@ def main():
             except Exception:
                 pass
 
-        if has_vid_eval and cached_vid_eval is not None:
-            sum_d = cached_vid_eval["summary"]
-            st.markdown("#### Video Evaluation Summary Analytics")
-            sum_df = pd.DataFrame([{
-                "Source Video": cached_vid_eval["source_name"],
-                "Total Frames Analyzed": sum_d["processed_frames_count"],
-                "Effective FPS": f"{sum_d['effective_fps']:.1f}",
-                "Peak Hazard Score": f"{sum_d['peak_hazard_score']:.3f}",
-                "Peak Occupant Count": sum_d["peak_people_count"],
-                "Peak Crowd Density": f"{sum_d['peak_crowd_density']:.3f}",
-                "Route Divergence Events": sum_d["route_changes_count"],
-                "Primary Dynamic Exit": sum_d["primary_recommended_exit"]
-            }])
-            st.dataframe(sum_df, hide_index=True, use_container_width=True)
+    # -------------------------------------------------------------------------
+    # WORKFLOW C: LIVE CAMERA
+    # -------------------------------------------------------------------------
+    else:
+        st.caption("Stream live video from your browser webcam or a local camera device. Frames route into real-time hazard detection and evacuation guidance.")
 
-    # WORKFLOW 3: Benchmark Test Images
-    elif selected_method == "Benchmark Test Images":
-        st.markdown('<div class="section-header">BENCHMARK TEST IMAGE EVALUATION</div>', unsafe_allow_html=True)
-        bench_opts = [
-            "flames_sample.jpg (Active Fire)",
-            "fire_sample.jpg (Smoke Plume)",
-            "crowd_sample.jpg (High Density Crowd)",
-            "compound_sample.jpg (Compound Fire + Crowd)",
-            "normal_sample.jpg (Nominal Clear Baseline)"
-        ]
-        curr_b_idx = 0
-        for b_i, b_opt in enumerate(bench_opts):
-            if st.session_state.active_sample_file in b_opt:
-                curr_b_idx = b_i
-                break
-        sel_bench = st.selectbox("Select Academic Benchmark File", options=bench_opts, index=curr_b_idx)
-        st.session_state.active_sample_file = sel_bench.split()[0]
-        sample_path = DATA_DIR / "test" / st.session_state.active_sample_file
-        if sample_path.exists():
-            raw_preview_frame = cv2.imread(str(sample_path))
-
-        b_c1, b_c2 = st.columns(2)
-        with b_c1:
-            st.markdown(f"**RAW BENCHMARK PREVIEW** (`{st.session_state.active_sample_file}`)")
-            if raw_preview_frame is not None:
-                st.image(cv2.cvtColor(raw_preview_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
-        with b_c2:
-            st.markdown("**AI ANNOTATED OUTPUT**")
-            cached_b = st.session_state.image_eval_cache
-            has_b_eval = (cached_b is not None and cached_b.get("source_name") == st.session_state.active_sample_file)
-            if has_b_eval and cached_b is not None:
-                ann_b = cached_b["result"].get("annotated_frame")
-                if ann_b is not None:
-                    st.image(cv2.cvtColor(ann_b, cv2.COLOR_BGR2RGB), use_container_width=True)
-            else:
-                st.info("Click 'Evaluate Benchmark Image' below to process.")
-
-        if st.button("🔍 Evaluate Benchmark Image", type="primary", use_container_width=True) and raw_preview_frame is not None:
-            res_b, raw_f, err_b = process_image_evaluation(system, raw_preview_frame, active_edge=active_edge, source_room=source_room)
-            if err_b is None:
-                st.session_state.image_eval_cache = {"result": res_b, "raw_frame": raw_f, "source_name": st.session_state.active_sample_file}
-                st.rerun()
-
-    # WORKFLOW 4: Browser Webcam (WebRTC / HTML5)
-    elif selected_method == "Browser Webcam (WebRTC / Cloud)":
-        is_video_mode = True
-        st.markdown('<div class="section-header">BROWSER WEBCAM STREAM (CLOUD & LOCAL COMPATIBLE)</div>', unsafe_allow_html=True)
-        if browser_cam_mode == "Live WebRTC Stream (Continuous)" and WEBRTC_AVAILABLE:
-            webrtc_col1, webrtc_col2 = st.columns([1.3, 1.0])
-            with webrtc_col1:
+        cam_c1, cam_c2 = st.columns([1.4, 1.0])
+        with cam_c1:
+            if WEBRTC_AVAILABLE:
+                st.markdown("**Live Browser Webcam (WebRTC)**")
                 rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]})
                 webrtc_ctx = webrtc_streamer(
-                    key="ai-fire-crowd-browser-webrtc",
+                    key="clean-ai-browser-webrtc",
                     mode=WebRtcMode.SENDRECV,
                     rtc_configuration=rtc_config,
                     video_processor_factory=BrowserWebcamProcessor,
                     media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
                     async_processing=True,
                 )
-            with webrtc_col2:
-                st.info("Click **START** in the WebRTC player. Live browser frames route directly into Dual YOLOv8 & Dynamic Dijkstra.")
-
-            if webrtc_ctx.state.playing and webrtc_ctx.video_processor is not None:
-                webrtc_playing_active = True
-                b_frame, b_count = webrtc_ctx.video_processor.get_latest_frame()
-                if b_frame is not None:
-                    raw_preview_frame = b_frame
-                    media_source_description = f"🟢 Browser WebRTC Live Stream &bull; Frame #{b_count} &bull; Res: {b_frame.shape[1]}x{b_frame.shape[0]}"
-        else:
-            cam_photo = st.camera_input("📸 Capture Frame from Browser Camera")
-            if cam_photo is not None:
-                b_arr = np.frombuffer(cam_photo.getvalue(), dtype=np.uint8)
-                raw_preview_frame = cv2.imdecode(b_arr, cv2.IMREAD_COLOR)
-
-    # WORKFLOW 5: CCTV Demo Video or Local Cameras (Live Stream Monitoring)
-    else:
-        if st.session_state.monitoring_active and st.session_state.video_stream is not None:
-            is_video_mode = True
-            success, v_frame = st.session_state.video_stream.get_frame(loop_video=True)
-            if success and v_frame is not None:
-                raw_preview_frame = v_frame
-                v_tel = st.session_state.video_stream.get_telemetry()
-                media_source_description = f"🟢 Live Monitoring Active &bull; {v_tel['source_type']} &bull; FPS: {v_tel['fps']} &bull; Frame: #{v_tel['frame_count']}"
+                if webrtc_ctx.state.playing and webrtc_ctx.video_processor is not None:
+                    b_frame, b_count = webrtc_ctx.video_processor.get_latest_frame()
+                    if b_frame is not None:
+                        res_live = system.process_frame(frame=b_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
+                        st.session_state.image_eval_cache = {
+                            "result": res_live,
+                            "raw_frame": b_frame,
+                            "source_name": f"Live_Webcam_Frame_{b_count}"
+                        }
             else:
-                st.session_state.monitoring_active = False
-                st.session_state.video_stream.release()
-                st.session_state.video_stream = None
-        else:
-            s_p = DATA_DIR / "test" / st.session_state.active_sample_file
-            if s_p.exists():
-                raw_preview_frame = cv2.imread(str(s_p))
-                media_source_description = f"Standby Mode ({selected_method}) &bull; Click '▶ START' in sidebar to activate."
+                cam_photo = st.camera_input("📸 Capture Frame from Browser Camera")
+                if cam_photo is not None:
+                    b_arr = np.frombuffer(cam_photo.getvalue(), dtype=np.uint8)
+                    c_frame = cv2.imdecode(b_arr, cv2.IMREAD_COLOR)
+                    if c_frame is not None:
+                        res_live = system.process_frame(frame=c_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
+                        st.session_state.image_eval_cache = {
+                            "result": res_live,
+                            "raw_frame": c_frame,
+                            "source_name": "Webcam_Snapshot"
+                        }
+                        st.success("Snapshot captured and analyzed! View Results tab.")
 
-    # -------------------------------------------------------------------------
-    # RESOLVE ACTIVE RESULT FOR TELEMETRY & TABS
-    # -------------------------------------------------------------------------
-    result: Optional[Dict[str, Any]] = None
-    input_frame: Optional[np.ndarray] = None
-    annotated_frame: Optional[np.ndarray] = None
+        with cam_c2:
+            st.markdown("""
+            <div class="clean-metric-card" style="text-align: left;">
+                <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 1rem;">Live Stream Guidance</h4>
+                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5;">
+                    Click <strong>START</strong> in the player to stream video. The system processes incoming frames and updates dynamic evacuation guidance in real-time.
+                </p>
+                <div style="font-size: 0.8rem; color: var(--text-secondary); background: var(--blue-soft); border-radius: 6px; padding: 8px;">
+                    ℹ️ For hardware USB or RTSP cameras, configure them in the <strong>Advanced Settings</strong> sidebar expander.
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-    if selected_method in ["Upload Image", "Benchmark Test Images"]:
-        cached = st.session_state.image_eval_cache
-        expected_src = target_img_name if selected_method == "Upload Image" else st.session_state.active_sample_file
-        if cached is not None and cached.get("source_name") == expected_src:
-            result = cached["result"]
-            input_frame = cached.get("raw_frame")
-            annotated_frame = result.get("annotated_frame", input_frame)
-            media_source_description = f"Evaluated Image: `{expected_src}`"
-        else:
-            input_frame = raw_preview_frame if raw_preview_frame is not None else cv2.imread(str(DATA_DIR / "test" / "normal_sample.jpg"))
-            result = get_standby_baseline_result(system, source_room=source_room, active_edge=active_edge, placeholder_frame=input_frame)
-            annotated_frame = result["annotated_frame"]
-            media_source_description = f"Standby &bull; Click 'Evaluate' above to trigger AI hazard perception."
 
-    elif selected_method == "Upload Video":
-        v_cache = st.session_state.video_eval_cache
-        if v_cache is not None and v_cache.get("source_name") == target_vid_name:
-            v_sum = v_cache["summary"]
-            result = v_sum.get("latest_result")
-            input_frame = v_sum.get("first_frame")
-            annotated_frame = result.get("annotated_frame") if result else input_frame
-            media_source_description = f"Evaluated Video: `{target_vid_name}`"
-        else:
-            input_frame = cv2.imread(str(DATA_DIR / "test" / "normal_sample.jpg"))
-            result = get_standby_baseline_result(system, source_room=source_room, active_edge=active_edge, placeholder_frame=input_frame)
-            annotated_frame = result["annotated_frame"]
-            media_source_description = f"Standby &bull; Click 'Evaluate Video' above to analyze CCTV frames."
+def _render_results_section(system, active_result, source_room, active_edge, now_ts):
+    """Renders the primary results section highlighting the hero Evacuation Guidance Card."""
+    st.markdown('<div class="section-header">DETECTION RESULTS &amp; EVACUATION GUIDANCE</div>', unsafe_allow_html=True)
 
-    elif selected_method == "Browser Webcam (WebRTC / Cloud)":
-        if raw_preview_frame is not None:
-            input_frame = raw_preview_frame
-            result = system.process_frame(frame=input_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
-            annotated_frame = result["annotated_frame"]
-        else:
-            input_frame = cv2.imread(str(DATA_DIR / "test" / "normal_sample.jpg"))
-            result = get_standby_baseline_result(system, source_room=source_room, active_edge=active_edge, placeholder_frame=input_frame)
-            annotated_frame = result["annotated_frame"]
+    ensure_complete_emergency_state(system=system, result=active_result, source_room=source_room, active_edge=active_edge)
+    em = active_result["emergency_state"]
 
-    else:
-        # Live Stream Monitoring / Local Camera / Standby
-        if raw_preview_frame is not None and st.session_state.monitoring_active:
-            input_frame = raw_preview_frame
-            result = system.process_frame(
-                frame=input_frame,
-                active_edge=active_edge,
-                source_room=source_room,
-                enable_frame_skip=(enable_frame_skip and is_video_mode),
-                skip_interval=frame_skip_val
-            )
-            annotated_frame = result["annotated_frame"]
-        else:
-            input_frame = raw_preview_frame if raw_preview_frame is not None else cv2.imread(str(DATA_DIR / "test" / "normal_sample.jpg"))
-            result = get_standby_baseline_result(system, source_room=source_room, active_edge=active_edge, placeholder_frame=input_frame)
-            annotated_frame = result["annotated_frame"]
+    has_fire = em["fire_detected"]
+    has_smoke = em["smoke_detected"]
+    hazard_score = em["hazard_score"]
+    people_count = em["people_count"]
+    current_exit = em["recommended_exit"]
+    current_route = em["recommended_route"]
+    current_cost = em["total_route_cost"]
+    route_changed = em["is_diverted_from_baseline"]
+    avoided_exit = em["avoided_exit"]
+    signage_dict = em["dynamic_signage"]
+    pa_announcement = em["pa_announcement"]
 
-    if input_frame is None or result is None or annotated_frame is None:
-        st.error("⚠️ Unable to resolve active surveillance frame.")
-        return
+    is_emergency = has_fire or has_smoke or (hazard_score > 0.4)
+    haz_type = "FIRE" if has_fire else ("SMOKE" if has_smoke else "NONE")
 
-    # Verify & unpack unified facility emergency state (Single Source of Truth)
-    ensure_complete_emergency_state(
-        system=system,
-        result=result,
-        source_room=source_room,
-        active_edge=active_edge
+    # HERO FEATURE: EVACUATION GUIDANCE CARD
+    render_evacuation_guidance_card(
+        recommended_exit=current_exit,
+        recommended_route=current_route,
+        is_emergency=is_emergency,
+        hazard_type=haz_type,
+        hazard_score=hazard_score,
+        crowd_density=em.get("crowd_density", 0.0),
+        adaptation_reason=em.get("adaptation_reason", ""),
+        avoided_exit=avoided_exit,
+        route_changed=route_changed,
+        total_cost=current_cost,
+        origin_room=source_room,
+        hazard_zone=f"{active_edge[0]} ↔ {active_edge[1]}"
     )
-    emergency_state = result["emergency_state"]
-    has_fire = emergency_state["fire_detected"]
-    has_smoke = emergency_state["smoke_detected"]
-    hazard_score = emergency_state["hazard_score"]
-    people_count = emergency_state["people_count"]
-    crowd_density = emergency_state["crowd_density"]
-    current_exit = emergency_state["recommended_exit"]
-    current_route = emergency_state["recommended_route"]
-    current_route_str = emergency_state["recommended_route_str"]
-    current_cost = emergency_state["total_route_cost"]
-    normal_route = emergency_state["baseline_route"]
-    normal_exit = emergency_state["baseline_exit"]
-    normal_cost = emergency_state["baseline_cost"]
-    hazard_status = emergency_state["status_level"]
-    hazard_type_str = emergency_state["hazard_type"]
-    crowd_status = emergency_state["crowd_status"]
-    zone_status_label = emergency_state["zone_status"]
-    route_changed = emergency_state["is_diverted_from_baseline"]
-    avoided_exit = emergency_state["avoided_exit"]
-    cost_delta = emergency_state["cost_delta_vs_baseline"]
-    adaptation_reason = emergency_state["adaptation_reason"]
-    signage_dict = emergency_state["dynamic_signage"]
-    pa_announcement = emergency_state["pa_announcement"]
 
-    latency_info = result.get("latency_metrics", {})
-    zone_counts = result.get("multi_zone_counts", {})
-    zone_densities = result.get("multi_zone_densities", {})
+    # SIDE-BY-SIDE: ANNOTATED VISUAL + DETECTION SUMMARY CARDS
+    st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+    res_c1, res_c2 = st.columns([1.2, 1.0])
 
-    # Retrieve graph edge metrics
-    edge_len = graph[active_edge[0]][active_edge[1]]["length"]
-    updated_edge_cost = graph[active_edge[0]][active_edge[1]]["cost"]
+    with res_c1:
+        st.markdown("**AI ANNOTATED PERCEPTION HUD (Dual YOLOv8 Output)**")
+        ann_frame = active_result.get("annotated_frame")
+        if ann_frame is not None:
+            rgb_ann = cv2.cvtColor(ann_frame, cv2.COLOR_BGR2RGB)
+            st.image(rgb_ann, caption="Dual YOLOv8 Perception HUD & Egress Directives", use_container_width=True)
+            is_enc, enc_buf = cv2.imencode(".png", ann_frame)
+            if is_enc:
+                st.download_button(
+                    label="📥 Download Annotated Image (.PNG)",
+                    data=enc_buf.tobytes(),
+                    file_name=f"AI_Evacuation_Annotated_{now_ts.replace(':', '')}.png",
+                    mime="image/png",
+                    use_container_width=True
+                )
+        else:
+            st.info("Awaiting visual inference feed.")
+
+    with res_c2:
+        f_conf = max([d["confidence"] for d in active_result.get("fire_detections", []) if d.get("class_name") == "fire"] or [0.0])
+        s_conf = max([d["confidence"] for d in active_result.get("fire_detections", []) if d.get("class_name") == "smoke"] or [0.0])
+
+        render_detection_summary_cards(
+            fire_detected=has_fire,
+            smoke_detected=has_smoke,
+            people_detected=people_count,
+            hazard_score=hazard_score,
+            crowd_density=em.get("crowd_density", 0.0),
+            total_route_cost=current_cost,
+            fire_conf=f_conf,
+            smoke_conf=s_conf
+        )
+
+        st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
+        render_simulated_led_signage(signage_dict=signage_dict)
+        render_pa_announcement(message=pa_announcement)
+
+    # QUICK NAVIGATION ACTION BUTTONS
+    st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
+    act_c1, act_c2, act_c3 = st.columns(3)
+    with act_c1:
+        if st.button("🔍 Analyze Another File", use_container_width=True):
+            st.session_state.nav_section = "🔍 Analyze"
+            st.rerun()
+    with act_c2:
+        if st.button("🗺️ View Evacuation & Map ➔", use_container_width=True, type="primary"):
+            st.session_state.nav_section = "🗺️ Evacuation & Map"
+            st.rerun()
+    with act_c3:
+        if st.button("📄 Generate Incident Reports ➔", use_container_width=True):
+            st.session_state.nav_section = "📄 Reports & Validation"
+            st.rerun()
+
+
+def _render_evacuation_section(system, active_result, source_room, active_edge, multi_floor_model, vulnerable_priority, vuln_category, dark_mode=False):
+    """Renders the comprehensive Evacuation, Building Twin, Multi-Zone Spatial, and Algorithm Comparison tab."""
+    st.markdown('<div class="section-header">EVACUATION PATHWAY &amp; FACILITY GRAPH MODEL</div>', unsafe_allow_html=True)
+
+    ensure_complete_emergency_state(system=system, result=active_result, source_room=source_room, active_edge=active_edge)
+    em = active_result["emergency_state"]
+
+    current_route = em["recommended_route"]
+    normal_route = em["baseline_route"]
+    current_exit = em["recommended_exit"]
+    normal_exit = em["baseline_exit"]
+    current_cost = em["total_route_cost"]
+    normal_cost = em["baseline_cost"]
+    hazard_score = em["hazard_score"]
+    crowd_density = em["crowd_density"]
+    hazard_status = em["status_level"]
+    route_changed = em["is_diverted_from_baseline"]
+    adaptation_reason = em["adaptation_reason"]
+    cost_delta = em["cost_delta_vs_baseline"]
+    people_count = em["people_count"]
+
+    graph = system.building_graph.get_graph()
+    zone_counts = active_result.get("multi_zone_counts", {})
+    zone_densities = active_result.get("multi_zone_densities", {})
+    edge_len = graph[active_edge[0]][active_edge[1]]["length"] if graph.has_edge(active_edge[0], active_edge[1]) else 1.0
+    updated_edge_cost = graph[active_edge[0]][active_edge[1]]["cost"] if graph.has_edge(active_edge[0], active_edge[1]) else 1.0
     baseline_edge_cost = GAMMA * edge_len
 
-    # Update Multi-Camera Simulator Telemetry for CAM-01 (Primary Active Camera)
-    st.session_state.camera_simulator.update_camera_telemetry(
-        cam_id="CAM-01",
-        fire_detected=has_fire,
-        smoke_detected=has_smoke,
-        hazard_score=hazard_score,
-        people_count=people_count,
-        crowd_density=crowd_density,
-        latency_ms=latency_info.get("total_ms", 0.0),
-        sample_file=st.session_state.active_sample_file
-    )
+    evac_tabs = st.tabs([
+        "1. Building Digital Twin",
+        "2. Spatial Congestion & Multi-Zone",
+        "3. Dynamic Cost & Algorithm Comparison",
+        "4. Multi-Floor Facility Model",
+        "5. Vulnerable Occupant Egress"
+    ])
 
-    # Update Temporal Hazard Tracker
-    f_conf = max([d["confidence"] for d in result.get("fire_detections", []) if d.get("class_name") == "fire"] or [0.0])
-    s_conf = max([d["confidence"] for d in result.get("fire_detections", []) if d.get("class_name") == "smoke"] or [0.0])
-    st.session_state.hazard_tracker.update(
-        hazard_score=hazard_score,
-        fire_conf=f_conf,
-        smoke_conf=s_conf,
-        people_count=people_count,
-        crowd_density=crowd_density,
-        camera_id="CAM-01",
-        zone=f"{active_edge[0]} <-> {active_edge[1]}",
-        camera_status="ONLINE"
-    )
-
-    # Calculate Evacuation Risk Index & Efficiency Index
-    risk_index = min(100, int(round((50.0 * hazard_score) + (30.0 * crowd_density) + (20.0 * min(1.0, current_cost / 25.0)))))
-    norm_c = min(1.0, current_cost / 30.0)
-    efficiency_index = max(0, min(100, int(round(100.0 - ((40.0 * hazard_score) + (30.0 * crowd_density) + (20.0 * norm_c))))))
-
-    # Calculate route physical distance
-    route_dist = 0.0
-    if current_route and len(current_route) > 1:
-        for idx in range(len(current_route) - 1):
-            if graph.has_edge(current_route[idx], current_route[idx + 1]):
-                route_dist += graph[current_route[idx]][current_route[idx + 1]]["length"]
-
-    # Update Telemetry History Buffer
-    st.session_state.telemetry_history.append({
-        "time": now_ts,
-        "hazard_score": hazard_score,
-        "crowd_density": crowd_density,
-        "people_count": people_count,
-        "route_cost": current_cost,
-        "efficiency": efficiency_index
-    })
-    if len(st.session_state.telemetry_history) > 30:
-        st.session_state.telemetry_history.pop(0)
-    if op_mode == "EMERGENCY COMMAND MODE":
-        # Streamlined, high-visibility emergency operations view
-        st.markdown("---")
-        st.markdown('<div class="section-header" style="color: #FF2E4D; border-left-color: #FF2E4D;">EMERGENCY EVACUATION DIRECTIVES</div>', unsafe_allow_html=True)
-
-        em_col1, em_col2 = st.columns([1.5, 1.0])
-        with em_col1:
-            render_emergency_alert(
-                has_fire=has_fire,
-                has_smoke=has_smoke,
-                hazard_score=hazard_score,
-                crowd_density=crowd_density,
-                active_edge=active_edge,
-                current_exit=current_exit,
-                alert_manager=system.alert_manager
+    # SUB-TAB 1: BUILDING DIGITAL TWIN
+    with evac_tabs[0]:
+        route_c1, route_c2 = st.columns([1.5, 1.0])
+        with route_c1:
+            st.markdown(f"**TOPOLOGICAL FACILITY MAP ({'Dark Command' if dark_mode else 'Light Modern'} Mode)**")
+            fig_map = system.building_graph.render_evacuation_map(
+                recommended_route=current_route,
+                previous_route=active_result.get("previous_route"),
+                source_room=source_room,
+                monitored_edge=active_edge,
+                hazardous_edges=[active_edge] if hazard_score > 0 else [],
+                congested_edges=[active_edge] if crowd_density >= 0.35 else [],
+                system_state=hazard_status,
+                dark_mode=dark_mode
             )
+            st.pyplot(fig_map)
+
+        with route_c2:
+            st.markdown("**DYNAMIC ROUTE SEGMENT BREAKDOWN**")
+            segments = []
+            if current_route and len(current_route) > 1:
+                for i in range(len(current_route) - 1):
+                    u, v = current_route[i], current_route[i + 1]
+                    if graph.has_edge(u, v):
+                        edge_d = graph[u][v]
+                        length = edge_d.get("length", 1.0)
+                        cost = edge_d.get("cost", length)
+                        is_mon = (set((u, v)) == set(active_edge))
+                        status_seg = "⚠️ HAZARD" if (is_mon and hazard_score > 0) else "🟢 CLEAR"
+                        segments.append({
+                            "Segment": f"{u} ➔ {v}",
+                            "Length": f"{length:.1f} m",
+                            "Dynamic Cost": f"{cost:.2f}",
+                            "Condition": status_seg
+                        })
+
+            if segments:
+                st.dataframe(pd.DataFrame(segments), hide_index=True, use_container_width=True)
+
             render_recommended_exit_panel(
                 recommended_exit=current_exit,
                 total_route_cost=current_cost,
-                route_distance=route_dist,
-                avoided_exit=avoided_exit
+                route_distance=sum([graph[current_route[i]][current_route[i+1]]["length"] for i in range(len(current_route)-1) if graph.has_edge(current_route[i], current_route[i+1])]) if len(current_route) > 1 else 0.0,
+                avoided_exit=em.get("avoided_exit")
             )
             render_route_flow_card(
                 route_nodes=current_route,
                 total_cost=current_cost,
                 route_changed=route_changed
             )
-        with em_col2:
-            render_simulated_led_signage(signage_dict=signage_dict)
-            render_pa_announcement(message=pa_announcement)
-            guard_logs = result.get("security_guard_log") or system.alert_manager.get_guard_log(limit=10)
-            render_security_guard_log(guard_logs=guard_logs, alert_manager=system.alert_manager)
 
-        st.markdown("---")
-        annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-        st.image(annotated_rgb, caption="Surveillance CCTV AI Annotated Feed (HUD)", use_container_width=True)
-        return  # End early in Emergency Command Mode
-
-    # -------------------------------------------------------------------------
-    # RESEARCH MODE: TOP NAVIGATION TABS (Feature 20)
-    # -------------------------------------------------------------------------
-    st.markdown("---")
-    tabs = st.tabs([
-        "OVERVIEW",
-        "LIVE CCTV",
-        "BUILDING DIGITAL TWIN",
-        "EVACUATION",
-        "ALERTS",
-        "ANALYTICS",
-        "XAI & ASSISTANT",
-        "VALIDATION",
-        "REPORTS & REPLAY"
-    ])
-
-    # TAB 1: OVERVIEW
-    with tabs[0]:
-        st.markdown('<div class="section-header">Operational Overview &amp; Primary Egress Status</div>', unsafe_allow_html=True)
-        render_evacuation_risk_index(
-            hazard_score=hazard_score,
-            crowd_density=crowd_density,
-            route_cost=current_cost,
-            route_changed=route_changed
-        )
-        render_evacuation_efficiency_card(
-            hazard_score=hazard_score,
-            crowd_density=crowd_density,
-            route_cost=current_cost,
-            exit_available=(current_exit in ["EXIT_A", "EXIT_B"])
-        )
-        render_perception_metrics(
-            has_fire=has_fire,
-            has_smoke=has_smoke,
-            hazard_score=hazard_score,
-            people_count=people_count,
-            crowd_density=crowd_density,
-            hazard_status=hazard_status,
-            crowd_status=crowd_status
-        )
-        render_hazard_zone_panel(
-            active_edge=active_edge,
-            hazard_type_str=hazard_type_str,
-            hazard_score=hazard_score,
-            crowd_density=crowd_density,
-            status_label=zone_status_label,
-            confidence=hazard_score
-        )
-        render_multi_camera_panel(camera_sim=st.session_state.camera_simulator)
-
-    # TAB 2: LIVE CCTV
-    with tabs[1]:
-        st.markdown('<div class="section-header">Surveillance CCTV Video Stream Ingestion (Raw vs AI HUD)</div>', unsafe_allow_html=True)
-        if media_source_description:
-            st.caption(f"Source: {media_source_description}")
-
-        feed_c1, feed_c2 = st.columns(2)
-        with feed_c1:
-            st.markdown("**RAW CCTV INPUT**")
-            raw_rgb = cv2.cvtColor(input_frame, cv2.COLOR_BGR2RGB)
-            st.image(raw_rgb, use_container_width=True)
-
-        with feed_c2:
-            st.markdown("**AI ANNOTATED OUTPUT (Bounding Boxes, HUD & Confidence)**")
-            annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            st.image(annotated_rgb, use_container_width=True)
-
-        h_in, w_in = input_frame.shape[:2] if input_frame is not None else (720, 1280)
-        render_cctv_meta_bar(
-            width=w_in,
-            height=h_in,
-            frame_num=latency_info.get("frame_number", 1),
-            latency_ms=latency_info.get("total_ms", 0.0),
-            fps=latency_info.get("fps", 0.0)
-        )
-        render_multi_camera_panel(camera_sim=st.session_state.camera_simulator)
-
-    # TAB 3: BUILDING DIGITAL TWIN (Features 2, 3 & 4)
-    with tabs[2]:
-        st.markdown('<div class="section-header">Building Digital Twin &mdash; Topological Graph Map</div>', unsafe_allow_html=True)
-
-        dt_c1, dt_c2 = st.columns([2, 1])
-        with dt_c1:
-            fig_map = system.building_graph.render_evacuation_map(
-                recommended_route=current_route,
-                previous_route=result.get("previous_route"),
-                source_room=source_room,
-                monitored_edge=active_edge,
-                hazardous_edges=[active_edge] if hazard_score > 0 else [],
-                congested_edges=[active_edge] if crowd_density >= 0.35 else [],
-                system_state=hazard_status,
-                dark_mode=True
-            )
-            st.pyplot(fig_map)
-
-        with dt_c2:
-            st.markdown("#### Topology Model Selector")
-            topology_choice = st.radio("Active Digital Twin Layout", options=["Baseline 7-Node Model (Default)", "Extended Multi-Floor Model (2 Floors)"], index=0)
-            if "Multi-Floor" in topology_choice:
-                floor_sel = st.selectbox("Floor View", options=["Ground Floor (Level 0)", "First Floor (Level 1)"], index=0)
-                fl_num = 0 if "Ground" in floor_sel else 1
-                fig_fl = multi_floor_model.render_floor_map(floor=fl_num, recommended_route=["G_ROOM_A", "G_CORRIDOR_1", "G_EXIT_A"] if fl_num == 0 else ["F1_ROOM_C", "F1_CORRIDOR_2", "F1_EXIT_B"], dark_mode=True)
-                st.pyplot(fig_fl)
-                st.caption("Connected vertically via Central Stairwell (STAIR_1).")
-            else:
-                st.info("Operating on standard single-level 7-node demonstration facility.")
-
-        # Multi-Zone Occupancy & Heatmap Ranking (Features 2 & 4)
+    # SUB-TAB 2: SPATIAL CONGESTION & MULTI-ZONE
+    with evac_tabs[1]:
         render_zone_risk_priority_table(
             zone_counts=zone_counts,
             zone_densities=zone_densities,
@@ -2154,9 +1633,8 @@ def main():
             zone_capacities=ZONE_MAX_CAPACITIES
         )
 
-    # TAB 4: EVACUATION & ROUTING
-    with tabs[3]:
-        st.markdown('<div class="section-header">Dynamic Dijkstra Evacuation Optimization</div>', unsafe_allow_html=True)
+    # SUB-TAB 3: DYNAMIC COST & ALGORITHM COMPARISON
+    with evac_tabs[2]:
         render_dynamic_cost_panel(
             alpha=ALPHA,
             beta=BETA,
@@ -2167,6 +1645,17 @@ def main():
             edge_cost=updated_edge_cost,
             active_edge=active_edge,
             baseline_cost=baseline_edge_cost
+        )
+        render_baseline_vs_proposed_panel(
+            normal_route=normal_route,
+            normal_exit=normal_exit,
+            normal_cost=normal_cost,
+            current_route=current_route,
+            current_exit=current_exit,
+            current_cost=current_cost,
+            hazard_score=hazard_score,
+            crowd_density=crowd_density,
+            dijkstra_ms=active_result.get("latency_metrics", {}).get("dijkstra_ms", 0.3)
         )
         render_route_comparison(
             normal_route=normal_route,
@@ -2179,76 +1668,89 @@ def main():
             reason=adaptation_reason,
             cost_delta=cost_delta
         )
-        render_recommended_exit_panel(
-            recommended_exit=current_exit,
-            total_route_cost=current_cost,
-            route_distance=route_dist,
-            avoided_exit=avoided_exit
-        )
-        render_route_flow_card(
-            route_nodes=current_route,
-            total_cost=current_cost,
-            route_changed=route_changed
-        )
-        render_baseline_vs_proposed_panel(
-            normal_route=normal_route,
-            normal_exit=normal_exit,
-            normal_cost=normal_cost,
-            current_route=current_route,
-            current_exit=current_exit,
-            current_cost=current_cost,
-            hazard_score=hazard_score,
-            crowd_density=crowd_density,
-            dijkstra_ms=latency_info.get("dijkstra_ms", 0.3)
-        )
         render_route_confidence_card(
             hazard_confidence=hazard_score,
             people_count=people_count,
             route_cost=current_cost,
             has_hazard=(hazard_score > 0)
         )
+
+    # SUB-TAB 4: MULTI-FLOOR FACILITY MODEL
+    with evac_tabs[3]:
+        fl_c1, fl_c2 = st.columns([1, 2])
+        with fl_c1:
+            floor_sel = st.selectbox("Select Floor Level to Inspect", options=["Ground Floor (Level 0)", "First Floor (Level 1)"], index=0)
+            fl_num = 0 if "Ground" in floor_sel else 1
+            st.info("Ground Floor connects to First Floor via Central Emergency Stairwell (`STAIR_1`).")
+        with fl_c2:
+            fig_fl = multi_floor_model.render_floor_map(
+                floor=fl_num,
+                recommended_route=["G_ROOM_A", "G_CORRIDOR_1", "G_EXIT_A"] if fl_num == 0 else ["F1_ROOM_C", "F1_CORRIDOR_2", "F1_EXIT_B"],
+                dark_mode=dark_mode
+            )
+            st.pyplot(fig_fl)
+
+    # SUB-TAB 5: VULNERABLE OCCUPANT EGRESS
+    with evac_tabs[4]:
         render_vulnerable_occupant_panel(
             vulnerable_enabled=vulnerable_priority,
             category=vuln_category
         )
 
-    # TAB 5: ALERTS & DISPATCH
-    with tabs[4]:
-        st.markdown('<div class="section-header">Emergency Notification &amp; Facility Guidance Dispatch</div>', unsafe_allow_html=True)
-        render_emergency_alert(
-            has_fire=has_fire,
-            has_smoke=has_smoke,
-            hazard_score=hazard_score,
-            crowd_density=crowd_density,
-            active_edge=active_edge,
-            current_exit=current_exit,
-            alert_manager=system.alert_manager
-        )
-        al_c1, al_c2 = st.columns(2)
-        with al_c1:
-            render_simulated_led_signage(signage_dict=signage_dict)
-        with al_c2:
-            render_pa_announcement(message=pa_announcement)
 
-        guard_logs = result.get("security_guard_log") or system.alert_manager.get_guard_log(limit=10)
-        render_security_guard_log(guard_logs=guard_logs, alert_manager=system.alert_manager)
-        route_history_list = result.get("route_history") or system.alert_manager.get_route_history(limit=10)
-        render_route_history_table(
-            route_history=route_history_list,
-            current_route=current_route,
-            normal_route=normal_route,
-            current_exit=current_exit,
-            normal_exit=normal_exit,
-            reason=adaptation_reason
+def _render_monitoring_section(system, active_result, source_room, active_edge, frame_skip_val, dark_mode=False):
+    """Renders the comprehensive Monitoring, Multi-Camera, Latency Telemetry, and Temporal Trends tab."""
+    st.markdown('<div class="section-header">SURVEILLANCE MONITORING &amp; TELEMETRY</div>', unsafe_allow_html=True)
+
+    ensure_complete_emergency_state(system=system, result=active_result, source_room=source_room, active_edge=active_edge)
+    em = active_result["emergency_state"]
+    latency_info = active_result.get("latency_metrics", {})
+    hazard_score = em["hazard_score"]
+    crowd_density = em["crowd_density"]
+    current_cost = em["total_route_cost"]
+    route_changed = em["is_diverted_from_baseline"]
+    input_frame = active_result.get("annotated_frame")
+
+    mon_tabs = st.tabs([
+        "1. Live CCTV Stream HUD",
+        "2. Multi-Camera Matrix (4 Channels)",
+        "3. Temporal Hazard Trends",
+        "4. Hardware Telemetry & Health"
+    ])
+
+    # SUB-TAB 1: LIVE CCTV STREAM HUD
+    with mon_tabs[0]:
+        feed_c1, feed_c2 = st.columns(2)
+        with feed_c1:
+            st.markdown("**RAW SURVEILLANCE INPUT**")
+            if input_frame is not None:
+                st.image(cv2.cvtColor(input_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
+            else:
+                st.info("Awaiting input stream.")
+        with feed_c2:
+            st.markdown("**AI ANNOTATED OUTPUT (Bounding Boxes, HUD & Confidence)**")
+            ann_frame = active_result.get("annotated_frame")
+            if ann_frame is not None:
+                st.image(cv2.cvtColor(ann_frame, cv2.COLOR_BGR2RGB), use_container_width=True)
+            else:
+                st.info("Awaiting annotated inference stream.")
+
+        h_in, w_in = input_frame.shape[:2] if input_frame is not None else (720, 1280)
+        render_cctv_meta_bar(
+            width=w_in,
+            height=h_in,
+            frame_num=latency_info.get("frame_number", 1),
+            latency_ms=latency_info.get("total_ms", 0.0),
+            fps=latency_info.get("fps", 0.0)
         )
 
-    # TAB 6: ANALYTICS & TELEMETRY
-    with tabs[5]:
-        st.markdown('<div class="section-header">Real-Time Performance Analytics &amp; Hardware Telemetry</div>', unsafe_allow_html=True)
-        render_performance_telemetry(latency_info=latency_info, frame_skip_val=frame_skip_val)
-        render_system_health_monitor(latency_info=latency_info, fps=latency_info.get("fps", 0.0), frame_skip=frame_skip_val)
+    # SUB-TAB 2: MULTI-CAMERA MATRIX
+    with mon_tabs[1]:
+        render_multi_camera_panel(camera_sim=st.session_state.camera_simulator)
+
+    # SUB-TAB 3: TEMPORAL HAZARD TRENDS
+    with mon_tabs[2]:
         render_temporal_trend_panel(history=st.session_state.telemetry_history, tracker=st.session_state.hazard_tracker)
-
         if st.session_state.telemetry_history and len(st.session_state.telemetry_history) > 1:
             df_hist = pd.DataFrame(st.session_state.telemetry_history)
             ch_c1, ch_c2 = st.columns(2)
@@ -2263,26 +1765,179 @@ def main():
                 c_df2.columns = ["Route Cost", "Efficiency Index"]
                 st.line_chart(c_df2, use_container_width=True)
 
-        # Research Experiment Mode (Feature 23)
-        st.markdown("---")
-        st.subheader("Research Sensitivity Experimentation")
-        exp_c1, exp_c2, exp_c3 = st.columns(3)
-        with exp_c1:
-            exp_alpha = st.slider("Experimental Hazard Weight (α)", 0.0, 15.0, ALPHA, 0.5)
-        with exp_c2:
-            exp_beta = st.slider("Experimental Crowd Weight (β)", 0.0, 10.0, BETA, 0.5)
-        with exp_c3:
-            exp_gamma = st.slider("Experimental Distance Weight (γ)", 0.01, 1.0, GAMMA, 0.05)
-        render_research_experiment_mode(alpha=exp_alpha, beta=exp_beta, gamma=exp_gamma)
+    # SUB-TAB 4: HARDWARE TELEMETRY & HEALTH
+    with mon_tabs[3]:
+        render_performance_telemetry(latency_info=latency_info, frame_skip_val=frame_skip_val)
+        render_system_health_monitor(latency_info=latency_info, fps=latency_info.get("fps", 0.0), frame_skip=frame_skip_val)
+        render_evacuation_risk_index(
+            hazard_score=hazard_score,
+            crowd_density=crowd_density,
+            route_cost=current_cost,
+            route_changed=route_changed
+        )
+        render_evacuation_efficiency_card(
+            hazard_score=hazard_score,
+            crowd_density=crowd_density,
+            route_cost=current_cost,
+            exit_available=(em["recommended_exit"] in ["EXIT_A", "EXIT_B"])
+        )
 
-    # TAB 7: XAI & DECISION ASSISTANT
-    with tabs[6]:
-        st.markdown('<div class="section-header">Explainable AI (XAI) &amp; Decision Justification</div>', unsafe_allow_html=True)
+
+def _render_intelligence_section(system, active_result, source_room, active_edge, now_ts, assistant):
+    """Renders Explainable AI, Emergency Decision Assistant, Scenario Controller, and Experimenter."""
+    st.markdown('<div class="section-header">INTELLIGENCE, XAI &amp; DEMO CONTROLLER</div>', unsafe_allow_html=True)
+
+    ensure_complete_emergency_state(system=system, result=active_result, source_room=source_room, active_edge=active_edge)
+    em = active_result["emergency_state"]
+    current_route = em["recommended_route"]
+    normal_route = em["baseline_route"]
+    current_exit = em["recommended_exit"]
+    normal_exit = em["baseline_exit"]
+    current_cost = em["total_route_cost"]
+    normal_cost = em["baseline_cost"]
+    hazard_score = em["hazard_score"]
+    crowd_density = em["crowd_density"]
+    route_changed = em["is_diverted_from_baseline"]
+    current_route_str = em["recommended_route_str"]
+    people_count = em["people_count"]
+    graph = system.building_graph.get_graph()
+
+    intel_tabs = st.tabs([
+        "1. Academic Scenario Controller (10 Scenarios)",
+        "2. Explainable AI (XAI)",
+        "3. Emergency Decision Assistant",
+        "4. Research Sensitivity Experimenter"
+    ])
+
+    # SUB-TAB 1: SCENARIO CONTROLLER
+    with intel_tabs[0]:
+        st.markdown("#### IEEE Demonstration Scenario Quick Switcher")
+        sc_c1, sc_c2, sc_c3, sc_c4, sc_c5, sc_c6 = st.columns(6)
+        with sc_c1:
+            if st.button("🟢 01 NORMAL", use_container_width=True):
+                st.session_state.active_sample_file = "normal_sample.jpg"
+                img_p = DATA_DIR / "test" / "normal_sample.jpg"
+                if img_p.exists():
+                    res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
+                    if res_demo is not None:
+                        st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "normal_sample.jpg"}
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 01 NORMAL activated: Clear baseline."})
+                st.rerun()
+        with sc_c2:
+            if st.button("💨 02 SMOKE", use_container_width=True):
+                st.session_state.active_sample_file = "fire_sample.jpg"
+                img_p = DATA_DIR / "test" / "fire_sample.jpg"
+                if img_p.exists():
+                    res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
+                    if res_demo is not None:
+                        st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "fire_sample.jpg"}
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 02 SMOKE activated: Smoke plume detected."})
+                st.rerun()
+        with sc_c3:
+            if st.button("🔥 03 FIRE", use_container_width=True):
+                st.session_state.active_sample_file = "flames_sample.jpg"
+                img_p = DATA_DIR / "test" / "flames_sample.jpg"
+                if img_p.exists():
+                    res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
+                    if res_demo is not None:
+                        st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "flames_sample.jpg"}
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 03 FIRE activated: Active flames detected."})
+                st.rerun()
+        with sc_c4:
+            if st.button("👥 04 HIGH CROWD", use_container_width=True):
+                st.session_state.active_sample_file = "crowd_sample.jpg"
+                img_p = DATA_DIR / "test" / "crowd_sample.jpg"
+                if img_p.exists():
+                    res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
+                    if res_demo is not None:
+                        st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "crowd_sample.jpg"}
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 04 HIGH CROWD activated: Congestion bottleneck."})
+                st.rerun()
+        with sc_c5:
+            if st.button("⚡ 05 COMPOUND", use_container_width=True):
+                st.session_state.active_sample_file = "compound_sample.jpg"
+                img_p = DATA_DIR / "test" / "compound_sample.jpg"
+                if img_p.exists():
+                    res_demo, raw_f, _ = process_image_evaluation(system, img_p, active_edge=active_edge, source_room=source_room)
+                    if res_demo is not None:
+                        st.session_state.image_eval_cache = {"result": res_demo, "raw_frame": raw_f, "source_name": "compound_sample.jpg"}
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 05 COMPOUND activated: Simultaneous fire + crowd."})
+                st.rerun()
+        with sc_c6:
+            if st.button("▶ RUN FULL DEMO", use_container_width=True):
+                st.session_state.run_benchmark_active = True
+
+        # Advanced Scenarios 6-10
+        adv_c1, adv_c2, adv_c3, adv_c4, adv_c5 = st.columns(5)
+        with adv_c1:
+            if st.button("📹 06 OCCLUSION", use_container_width=True):
+                st.session_state.camera_simulator.update_camera_telemetry(cam_id="CAM-01", fire_detected=False, smoke_detected=False, hazard_score=0.0, people_count=0, crowd_density=0.0, coverage="UNAVAILABLE", occlusion="HIGH")
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 06: Camera occlusion on CAM-01 triggered coverage uncertainty."})
+                st.rerun()
+        with adv_c2:
+            if st.button("🚫 07 EXIT BLOCKED", use_container_width=True):
+                st.session_state.active_sample_file = "flames_sample.jpg"
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 07: EXIT_A access corridor blocked."})
+                st.rerun()
+        with adv_c3:
+            if st.button("🔥 08 MULTI-ZONE", use_container_width=True):
+                st.session_state.camera_simulator.update_camera_telemetry(cam_id="CAM-01", fire_detected=True, smoke_detected=False, hazard_score=0.88, people_count=2, crowd_density=0.1, sample_file="flames_sample.jpg")
+                st.session_state.camera_simulator.update_camera_telemetry(cam_id="CAM-02", fire_detected=False, smoke_detected=True, hazard_score=0.65, people_count=5, crowd_density=0.3, sample_file="fire_sample.jpg")
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 08: Multi-zone hazard across CAM-01 and CAM-02."})
+                st.rerun()
+        with adv_c4:
+            if st.button("👥 09 CROWD+SMOKE", use_container_width=True):
+                st.session_state.active_sample_file = "compound_sample.jpg"
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 09: Heavy occupant density fleeing smoke plume."})
+                st.rerun()
+        with adv_c5:
+            if st.button("📡 10 MULTI-CAM", use_container_width=True):
+                st.session_state.incident_events.append({"time": now_ts, "desc": "Scenario 10: Multi-camera synchronized surveillance incident."})
+                st.rerun()
+
+        if st.session_state.get("run_benchmark_active", False):
+            st.markdown("#### Sequential Benchmark Sweep Results (5 IEEE Scenarios)")
+            scenarios = [
+                ("01 NORMAL", "normal_sample.jpg"),
+                ("02 SMOKE", "fire_sample.jpg"),
+                ("03 FIRE", "flames_sample.jpg"),
+                ("04 HIGH CROWD", "crowd_sample.jpg"),
+                ("05 COMPOUND", "compound_sample.jpg")
+            ]
+            b_res = []
+            p_bar = st.progress(0.0)
+            for i, (sc_name, sc_img) in enumerate(scenarios):
+                img_p = DATA_DIR / "test" / sc_img
+                if img_p.exists():
+                    b_frame = cv2.imread(str(img_p))
+                    t0_b = time.time()
+                    res = system.process_frame(b_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
+                    ensure_complete_emergency_state(system=system, result=res, source_room=source_room, active_edge=active_edge)
+                    dt_b = (time.time() - t0_b) * 1000.0
+                    b_res.append({
+                        "Scenario": sc_name,
+                        "Fire": "YES" if res["fire_detected"] else "NO",
+                        "Smoke": "YES" if res["smoke_detected"] else "NO",
+                        "People": res["people_detected"],
+                        "Density": f"{res['crowd_density']:.3f}",
+                        "Hazard": f"{res['hazard_score']:.3f}",
+                        "Dynamic Exit": res["recommended_exit"],
+                        "Route": res["recommended_route_str"],
+                        "Total Cost": f"{res['total_route_cost']:.2f}",
+                        "Latency": f"{dt_b:.1f} ms"
+                    })
+                p_bar.progress((i + 1) / len(scenarios))
+                time.sleep(0.04)
+            st.dataframe(pd.DataFrame(b_res), hide_index=True, use_container_width=True)
+            st.success("✅ **BENCHMARK COMPLETE**: All 5 sequential scenarios evaluated successfully via real Dual YOLOv8 perception and Dynamic Dijkstra routing!")
+
+    # SUB-TAB 2: EXPLAINABLE AI
+    with intel_tabs[1]:
         render_advanced_xai_panel(
             active_edge=active_edge,
             hazard_score=hazard_score,
             crowd_density=crowd_density,
-            edge_len=edge_len,
+            edge_len=graph[active_edge[0]][active_edge[1]]["length"] if graph.has_edge(active_edge[0], active_edge[1]) else 1.0,
             total_cost=current_cost,
             normal_exit=normal_exit,
             current_exit=current_exit,
@@ -2297,9 +1952,12 @@ def main():
             total_cost=current_cost,
             recommended_exit=current_exit
         )
+
+    # SUB-TAB 3: EMERGENCY DECISION ASSISTANT
+    with intel_tabs[2]:
         assistant_state = {
-            "fire_detected": has_fire,
-            "smoke_detected": has_smoke,
+            "fire_detected": em["fire_detected"],
+            "smoke_detected": em["smoke_detected"],
             "hazard_score": hazard_score,
             "people_detected": people_count,
             "crowd_density": crowd_density,
@@ -2309,54 +1967,89 @@ def main():
             "recommended_route_str": current_route_str,
             "active_edge": active_edge,
             "total_route_cost": current_cost,
-            "edge_cost": updated_edge_cost,
-            "risk_index": risk_index
+            "edge_cost": current_cost,
+            "risk_index": min(100, int(round((50.0 * hazard_score) + (30.0 * crowd_density) + (20.0 * min(1.0, current_cost / 25.0)))))
         }
         render_decision_assistant(assistant=assistant, state=assistant_state)
 
-    # TAB 8: VALIDATION & IEEE ARCHITECTURE
-    with tabs[7]:
-        st.markdown('<div class="section-header">System Validation &amp; IEEE Paper Alignment</div>', unsafe_allow_html=True)
-        render_system_validation_panel()
-        render_model_evaluation_panel()
-        render_false_alarm_panel()
-        render_system_architecture_diagram()
-        render_mathematical_model_panel()
-        render_ieee_traceability_matrix()
+    # SUB-TAB 4: SENSITIVITY EXPERIMENTER
+    with intel_tabs[3]:
+        exp_c1, exp_c2, exp_c3 = st.columns(3)
+        with exp_c1:
+            exp_alpha = st.slider("Experimental Hazard Weight (α)", 0.0, 15.0, ALPHA, 0.5)
+        with exp_c2:
+            exp_beta = st.slider("Experimental Crowd Weight (β)", 0.0, 10.0, BETA, 0.5)
+        with exp_c3:
+            exp_gamma = st.slider("Experimental Distance Weight (γ)", 0.01, 1.0, GAMMA, 0.05)
+        render_research_experiment_mode(alpha=exp_alpha, beta=exp_beta, gamma=exp_gamma)
 
-    # TAB 9: REPORTS & REPLAY
-    with tabs[8]:
-        st.markdown('<div class="section-header">Incident Replay &amp; Digital Audit Report Export</div>', unsafe_allow_html=True)
-        render_incident_replay_panel(events=st.session_state.incident_events)
 
-        report_payload = {
-            "origin_room": source_room,
-            "monitored_edge": f"{active_edge[0]} <-> {active_edge[1]}",
-            "fire_detected": "YES" if has_fire else "NO",
-            "smoke_detected": "YES" if has_smoke else "NO",
-            "hazard_score": hazard_score,
-            "people_detected": people_count,
-            "crowd_density": crowd_density,
-            "risk_index": risk_index,
-            "efficiency_index": efficiency_index,
-            "baseline_route": " -> ".join(normal_route) if normal_route else "NONE",
-            "dynamic_route": current_route_str,
-            "recommended_exit": current_exit,
-            "baseline_cost": normal_cost,
-            "route_cost": current_cost,
-            "route_changed": "YES" if route_changed else "NO",
-            "reroute_reason": adaptation_reason,
-            "guard_action": f"Evacuate via {current_exit}" if route_changed else "Monitor corridor",
-            "signage_status": "Dynamic routes active",
-            "pa_message": pa_announcement,
-            "fire_ms": latency_info.get("fire_ms", 0.0),
-            "crowd_ms": latency_info.get("crowd_ms", 0.0),
-            "dijkstra_ms": latency_info.get("dijkstra_ms", 0.0),
-            "total_ms": latency_info.get("total_ms", 0.0),
-            "fps": latency_info.get("fps", 0.0)
-        }
+def _render_reports_section(system, active_result, source_room, active_edge, now_ts):
+    """Renders Incident Reports, Downloads, Logs, and System Validation Panels."""
+    st.markdown('<div class="section-header">INCIDENT AUDIT, LOGS &amp; SYSTEM VALIDATION</div>', unsafe_allow_html=True)
 
-        st.markdown("#### Digital Incident Report Downloads")
+    ensure_complete_emergency_state(system=system, result=active_result, source_room=source_room, active_edge=active_edge)
+    em = active_result["emergency_state"]
+
+    has_fire = em["fire_detected"]
+    has_smoke = em["smoke_detected"]
+    hazard_score = em["hazard_score"]
+    people_count = em["people_count"]
+    crowd_density = em["crowd_density"]
+    current_exit = em["recommended_exit"]
+    current_route_str = em["recommended_route_str"]
+    current_route = em["recommended_route"]
+    current_cost = em["total_route_cost"]
+    normal_route = em["baseline_route"]
+    normal_exit = em["baseline_exit"]
+    normal_cost = em["baseline_cost"]
+    route_changed = em["is_diverted_from_baseline"]
+    adaptation_reason = em["adaptation_reason"]
+    pa_announcement = em["pa_announcement"]
+    latency_info = active_result.get("latency_metrics", {})
+
+    risk_index = min(100, int(round((50.0 * hazard_score) + (30.0 * crowd_density) + (20.0 * min(1.0, current_cost / 25.0)))))
+    norm_c = min(1.0, current_cost / 30.0)
+    efficiency_index = max(0, min(100, int(round(100.0 - ((40.0 * hazard_score) + (30.0 * crowd_density) + (20.0 * norm_c))))))
+
+    report_payload = {
+        "origin_room": source_room,
+        "monitored_edge": f"{active_edge[0]} ↔ {active_edge[1]}",
+        "fire_detected": "YES" if has_fire else "NO",
+        "smoke_detected": "YES" if has_smoke else "NO",
+        "hazard_score": hazard_score,
+        "people_detected": people_count,
+        "crowd_density": crowd_density,
+        "risk_index": risk_index,
+        "efficiency_index": efficiency_index,
+        "baseline_route": " -> ".join(normal_route) if normal_route else "NONE",
+        "dynamic_route": current_route_str,
+        "recommended_exit": current_exit,
+        "baseline_cost": normal_cost,
+        "route_cost": current_cost,
+        "route_changed": "YES" if route_changed else "NO",
+        "reroute_reason": adaptation_reason,
+        "guard_action": f"Direct occupants to {current_exit}" if route_changed else "Maintain nominal patrol",
+        "signage_status": "Dynamic guidance active",
+        "pa_message": pa_announcement,
+        "fire_ms": latency_info.get("fire_ms", 0.0),
+        "crowd_ms": latency_info.get("crowd_ms", 0.0),
+        "dijkstra_ms": latency_info.get("dijkstra_ms", 0.0),
+        "total_ms": latency_info.get("total_ms", 0.0),
+        "fps": latency_info.get("fps", 0.0)
+    }
+
+    rep_tabs = st.tabs([
+        "1. Incident Audit & Downloads",
+        "2. Security Guard & Dispatch Log",
+        "3. Route Divergence History",
+        "4. Validation & IEEE Alignment",
+        "5. Prototype Notes & Limitations"
+    ])
+
+    # SUB-TAB 1: INCIDENT AUDIT & DOWNLOADS
+    with rep_tabs[0]:
+        st.markdown("#### Digital Incident Audit Downloads")
         rep_c1, rep_c2, rep_c3 = st.columns(3)
         with rep_c1:
             st.download_button(
@@ -2383,28 +2076,400 @@ def main():
                 use_container_width=True
             )
 
+        st.markdown("#### Incident Telemetry Snapshot")
+        t_df = pd.DataFrame([{
+            "Origin": source_room,
+            "Monitored Edge": report_payload["monitored_edge"],
+            "Fire": report_payload["fire_detected"],
+            "Smoke": report_payload["smoke_detected"],
+            "Hazard Score": f"{hazard_score:.3f}",
+            "People Count": people_count,
+            "Recommended Exit": current_exit,
+            "Dynamic Cost": f"{current_cost:.2f}",
+            "Reroute Required": report_payload["route_changed"]
+        }])
+        st.dataframe(t_df, hide_index=True, use_container_width=True)
+
+    # SUB-TAB 2: SECURITY GUARD & DISPATCH LOG
+    with rep_tabs[1]:
+        log_c1, log_c2 = st.columns(2)
+        with log_c1:
+            guard_logs = active_result.get("security_guard_log") or system.alert_manager.get_guard_log(limit=10)
+            render_security_guard_log(guard_logs=guard_logs, alert_manager=system.alert_manager)
+        with log_c2:
+            render_incident_replay_panel(events=st.session_state.incident_events)
+
+    # SUB-TAB 3: ROUTE DIVERGENCE HISTORY
+    with rep_tabs[2]:
+        route_history_list = active_result.get("route_history") or system.alert_manager.get_route_history(limit=10)
+        render_route_history_table(
+            route_history=route_history_list,
+            current_route=current_route,
+            normal_route=normal_route,
+            current_exit=current_exit,
+            normal_exit=normal_exit,
+            reason=adaptation_reason
+        )
+
+    # SUB-TAB 4: VALIDATION & IEEE ALIGNMENT
+    with rep_tabs[3]:
+        render_system_validation_panel()
+        render_model_evaluation_panel()
+        render_false_alarm_panel()
+        render_system_architecture_diagram()
+        render_mathematical_model_panel()
+        render_ieee_traceability_matrix()
+
+    # SUB-TAB 5: PROTOTYPE NOTES & LIMITATIONS
+    with rep_tabs[4]:
         render_prototype_notes()
+        render_academic_limitations()
 
-    # Developer Diagnostics Expander
-    with st.expander("🛠️ Developer Diagnostics & Configuration Metadata", expanded=False):
+
+# -----------------------------------------------------------------------------
+# 2. MAIN APPLICATION ENTRYPOINT
+# -----------------------------------------------------------------------------
+def main():
+    _ensure_fresh_system_modules()
+    system, init_err = get_system()
+    if init_err:
+        st.error(f"[!] System Engine Initialization Failed: {init_err}")
+        return
+    system = _ensure_compatible_system_instance(system)
+
+    multi_floor_model = get_multi_floor_model()
+    assistant = get_decision_assistant()
+
+    now_ts = datetime.datetime.now().strftime("%H:%M:%S")
+
+    # -------------------------------------------------------------------------
+    # SESSION STATE INITIALIZATION
+    # -------------------------------------------------------------------------
+    if "nav_section" not in st.session_state:
+        st.session_state.nav_section = "🏠 Home"
+    if "input_method" not in st.session_state:
+        st.session_state.input_method = "Upload Image"
+    if "dark_mode" not in st.session_state:
+        st.session_state.dark_mode = False
+    if "op_mode" not in st.session_state:
+        st.session_state.op_mode = "RESEARCH MODE"
+    if "camera_simulator" not in st.session_state:
+        st.session_state.camera_simulator = MultiCameraSimulator()
+    if "hazard_tracker" not in st.session_state:
+        st.session_state.hazard_tracker = TemporalHazardTracker()
+    if "video_stream" not in st.session_state:
+        st.session_state.video_stream = None
+    if "monitoring_active" not in st.session_state:
+        st.session_state.monitoring_active = False
+    if "active_sample_file" not in st.session_state:
+        st.session_state.active_sample_file = "flames_sample.jpg"
+    if "image_eval_cache" not in st.session_state:
+        st.session_state.image_eval_cache = None
+    if "video_eval_cache" not in st.session_state:
+        st.session_state.video_eval_cache = None
+    if "discovered_cameras" not in st.session_state:
+        st.session_state.discovered_cameras = None
+    if "last_camera_error" not in st.session_state:
+        st.session_state.last_camera_error = ""
+    if "run_benchmark_active" not in st.session_state:
+        st.session_state.run_benchmark_active = False
+    if "telemetry_history" not in st.session_state:
+        st.session_state.telemetry_history = []
+    if "incident_events" not in st.session_state:
+        st.session_state.incident_events = [
+            {"time": now_ts, "desc": "AI Evacuation Assistant online. Dual YOLOv8 models loaded."},
+            {"time": now_ts, "desc": "Topological building digital twin loaded. Dijkstra optimizer online."},
+            {"time": now_ts, "desc": "System ready on standby. Select Image or Video to analyze."}
+        ]
+
+    # Inject Theme Styles based on dark_mode session state
+    st.markdown(get_custom_css(dark_mode=st.session_state.dark_mode), unsafe_allow_html=True)
+
+    # -------------------------------------------------------------------------
+    # SIDEBAR: NAVIGATION & DISPLAY CONTROLS
+    # -------------------------------------------------------------------------
+    st.sidebar.markdown("### 🧭 Navigation")
+    nav_options = [
+        "🏠 Home",
+        "🔍 Analyze",
+        "📊 Results",
+        "🗺️ Evacuation & Map",
+        "📡 Monitoring & Telemetry",
+        "🧠 Intelligence & XAI",
+        "📄 Reports & Validation"
+    ]
+    if st.session_state.nav_section not in nav_options:
+        st.session_state.nav_section = "🏠 Home"
+
+    nav_index = nav_options.index(st.session_state.nav_section)
+    selected_nav = st.sidebar.radio("Navigation", options=nav_options, index=nav_index, label_visibility="collapsed")
+    if selected_nav != st.session_state.nav_section:
+        st.session_state.nav_section = selected_nav
+        st.rerun()
+
+    # Determine Active Hazard Status for Status Indicator
+    has_active_emergency = False
+    if st.session_state.image_eval_cache is not None:
+        em = st.session_state.image_eval_cache["result"].get("emergency_state", {})
+        if em.get("fire_detected") or em.get("smoke_detected") or em.get("hazard_score", 0) > 0.4:
+            has_active_emergency = True
+    elif st.session_state.video_eval_cache is not None:
+        v_sum = st.session_state.video_eval_cache["summary"]
+        if v_sum.get("peak_hazard_score", 0) > 0.4:
+            has_active_emergency = True
+
+    # Sidebar Status Indicator
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🚦 System Status")
+    if has_active_emergency:
+        st.sidebar.markdown("""
+        <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid #EF4444; border-radius: 8px; padding: 10px 14px; color: #DC2626; font-weight: 600; font-size: 0.9rem;">
+            🚨 EMERGENCY ACTIVE<br>
+            <span style="font-size: 0.8rem; font-weight: 400; color: #B91C1C;">Hazard detected. Dynamic egress route diverted.</span>
+        </div>
+        """, unsafe_allow_html=True)
+    elif st.session_state.monitoring_active:
+        st.sidebar.markdown("""
+        <div style="background: rgba(37, 99, 235, 0.15); border: 1px solid #2563EB; border-radius: 8px; padding: 10px 14px; color: #2563EB; font-weight: 600; font-size: 0.9rem;">
+            🔄 EVALUATING<br>
+            <span style="font-size: 0.8rem; font-weight: 400; color: #1D4ED8;">Continuous surveillance perception active.</span>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.sidebar.markdown("""
+        <div style="background: rgba(22, 163, 74, 0.15); border: 1px solid #16A34A; border-radius: 8px; padding: 10px 14px; color: #16A34A; font-weight: 600; font-size: 0.9rem;">
+            🟢 SYSTEM READY<br>
+            <span style="font-size: 0.8rem; font-weight: 400; color: #15803D;">Dual YOLOv8 & Dijkstra idle. Ready for input.</span>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # -------------------------------------------------------------------------
+    # SIDEBAR: DISPLAY & OPERATIONAL MODES
+    # -------------------------------------------------------------------------
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ⚙️ Mode & Theme")
+    op_mode_choice = st.sidebar.radio(
+        "Operational Mode",
+        options=["RESEARCH MODE", "EMERGENCY COMMAND MODE"],
+        index=0 if st.session_state.op_mode == "RESEARCH MODE" else 1,
+        help="Research Mode displays comprehensive analytics, algorithms, and XAI. Emergency Mode streamlines high-visibility directives."
+    )
+    if op_mode_choice != st.session_state.op_mode:
+        st.session_state.op_mode = op_mode_choice
+        st.rerun()
+
+    theme_choice = st.sidebar.radio(
+        "Dashboard Theme",
+        options=["Light Mode ☀️", "Dark Mode 🌙"],
+        index=1 if st.session_state.dark_mode else 0,
+        help="Toggle between modern light theme and dark command-center theme."
+    )
+    is_dark = (theme_choice == "Dark Mode 🌙")
+    if is_dark != st.session_state.dark_mode:
+        st.session_state.dark_mode = is_dark
+        st.rerun()
+
+    # -------------------------------------------------------------------------
+    # SIDEBAR: ADVANCED CONFIGURATION EXPANDER
+    # -------------------------------------------------------------------------
+    st.sidebar.markdown("---")
+    with st.sidebar.expander("⚙️ Configuration & Diagnostics", expanded=False):
+        st.markdown("**Origin Room**")
+        graph = system.building_graph.get_graph()
+        graph_rooms = sorted(list(dict.fromkeys([
+            n for n, d in graph.nodes(data=True)
+            if d.get("node_type") == "ROOM" or str(n).startswith("ROOM_")
+        ]))) or ["ROOM_A", "ROOM_B", "ROOM_C"]
+        source_room = st.selectbox("Active Origin Room", options=graph_rooms, index=0, label_visibility="collapsed")
+
+        st.markdown("**Monitored Corridor Zone**")
+        edge_descriptions = {
+            ("CORRIDOR_1", "EXIT_A"): "CORRIDOR_1 ↔ EXIT_A (North Exit Corridor)",
+            ("CORRIDOR_2", "EXIT_B"): "CORRIDOR_2 ↔ EXIT_B (South Exit Corridor)",
+            ("CORRIDOR_1", "CORRIDOR_2"): "CORRIDOR_1 ↔ CORRIDOR_2 (Central Hallway)",
+            ("ROOM_A", "CORRIDOR_1"): "ROOM_A ↔ CORRIDOR_1 (Room A Access)",
+            ("ROOM_B", "CORRIDOR_1"): "ROOM_B ↔ CORRIDOR_1 (Room B North)",
+            ("ROOM_B", "CORRIDOR_2"): "ROOM_B ↔ CORRIDOR_2 (Room B South)",
+            ("ROOM_C", "CORRIDOR_2"): "ROOM_C ↔ CORRIDOR_2 (Room C Access)",
+        }
+        mon_options = list(edge_descriptions.values())
+        monitored_edge_label = st.selectbox("Monitored Corridor Zone", options=mon_options, index=0, label_visibility="collapsed")
+        edge_lookup = {v: k for k, v in edge_descriptions.items()}
+        active_edge = edge_lookup.get(monitored_edge_label, ("CORRIDOR_1", "EXIT_A"))
+
+        st.markdown("**Detection Confidence Threshold**")
+        conf_threshold = st.slider("Detection Threshold", min_value=0.10, max_value=0.90, value=0.35, step=0.05, label_visibility="collapsed")
+        system.fire_detector.conf_threshold = conf_threshold
+        system.crowd_detector.conf_threshold = conf_threshold
+
+        st.markdown("**Vulnerable Occupant Simulation**")
+        vulnerable_priority = st.checkbox("Enable Vulnerable Priority Egress", value=False)
+        vuln_category = st.selectbox("Assistance Profile", options=["Mobility Assistance (Wheelchair)", "Elderly Occupant", "Child Group"], index=0)
+        if vulnerable_priority:
+            system.optimizer.beta = BETA + 1.5
+        else:
+            system.optimizer.beta = BETA
+
+        st.markdown("**Video Frame Sampling**")
+        enable_frame_skip = st.checkbox("Enable Frame Skipping", value=True)
+        frame_skip_val = st.slider("Sample Every N Frames", min_value=1, max_value=15, value=PROCESS_EVERY_N_FRAMES, label_visibility="collapsed")
+
+        cloud_env = is_cloud_environment()
+        if not cloud_env:
+            st.markdown("**Hardware Camera Scanning**")
+            if st.button("Scan Local Cameras (0–5)", use_container_width=True):
+                st.session_state.discovered_cameras = discover_available_cameras(max_index=5)
+
+        st.markdown("---")
         st.markdown(f"""
-        - **Python Version**: `{sys.version.split()[0]}`
-        - **Project Directory**: `{project_root}`
-        - **Weights**: `ALPHA={ALPHA}, BETA={BETA}, GAMMA={GAMMA}`
-        - **Detection Threshold**: `{conf_threshold}`
-        - **Topological Nodes**: `{list(system.building_graph.graph.nodes())}`
-        - **Monitored Edge**: `{active_edge}`
-        - **Vulnerable Priority**: `{vulnerable_priority}`
-        """)
+        <div style="font-size: 0.76rem; color: var(--text-muted); line-height: 1.4;">
+            <strong>System Diagnostics:</strong><br>
+            Python: <code>{sys.version.split()[0]}</code><br>
+            Environment: <code>{'Streamlit Cloud' if cloud_env else 'Local Desktop'}</code><br>
+            Weights: <code>α={ALPHA}, β={BETA}, γ={GAMMA}</code><br>
+            Nodes: <code>{len(list(system.building_graph.graph.nodes()))} nodes</code>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # Live continuous monitoring loop auto-refresh
+    # -------------------------------------------------------------------------
+    # RESOLVE ACTIVE RESULT (Single Source of Truth)
+    # -------------------------------------------------------------------------
+    active_result = None
+    input_frame = None
+
+    if st.session_state.image_eval_cache is not None:
+        active_result = st.session_state.image_eval_cache["result"]
+        input_frame = st.session_state.image_eval_cache.get("raw_frame")
+    elif st.session_state.video_eval_cache is not None:
+        v_sum = st.session_state.video_eval_cache["summary"]
+        active_result = v_sum.get("latest_result")
+        input_frame = v_sum.get("first_frame")
+
+    if active_result is None or input_frame is None:
+        placeholder_path = DATA_DIR / "test" / "normal_sample.jpg"
+        if placeholder_path.exists():
+            input_frame = cv2.imread(str(placeholder_path))
+        else:
+            input_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        active_result = get_standby_baseline_result(system, source_room=source_room, active_edge=active_edge, placeholder_frame=input_frame)
+
+    ensure_complete_emergency_state(system=system, result=active_result, source_room=source_room, active_edge=active_edge)
+    em_state = active_result["emergency_state"]
+
+    # Top Application Header
+    header_status = "Emergency Detected" if has_active_emergency else ("Evaluating" if st.session_state.monitoring_active else "System Ready")
+    render_simple_header(status=header_status)
+
+    # -------------------------------------------------------------------------
+    # EMERGENCY COMMAND MODE OVERRIDE (High-Visibility Directives)
+    # -------------------------------------------------------------------------
+    if st.session_state.op_mode == "EMERGENCY COMMAND MODE":
+        st.markdown('<div class="section-header" style="color: #DC2626; border-left-color: #DC2626;">EMERGENCY EVACUATION DIRECTIVES</div>', unsafe_allow_html=True)
+        em_col1, em_col2 = st.columns([1.5, 1.0])
+        with em_col1:
+            render_emergency_alert(
+                has_fire=em_state["fire_detected"],
+                has_smoke=em_state["smoke_detected"],
+                hazard_score=em_state["hazard_score"],
+                crowd_density=em_state["crowd_density"],
+                active_edge=active_edge,
+                current_exit=em_state["recommended_exit"],
+                alert_manager=system.alert_manager
+            )
+            em_haz_type = "FIRE" if em_state["fire_detected"] else ("SMOKE" if em_state["smoke_detected"] else "NONE")
+            render_evacuation_guidance_card(
+                recommended_exit=em_state["recommended_exit"],
+                recommended_route=em_state["recommended_route"],
+                is_emergency=(em_state["fire_detected"] or em_state["smoke_detected"] or em_state["hazard_score"] > 0.4),
+                hazard_type=em_haz_type,
+                hazard_score=em_state["hazard_score"],
+                crowd_density=em_state["crowd_density"],
+                adaptation_reason=em_state.get("adaptation_reason", ""),
+                avoided_exit=em_state["avoided_exit"],
+                route_changed=em_state["is_diverted_from_baseline"],
+                total_cost=em_state["total_route_cost"],
+                origin_room=source_room,
+                hazard_zone=f"{active_edge[0]} ↔ {active_edge[1]}"
+            )
+        with em_col2:
+            render_simulated_led_signage(signage_dict=em_state["dynamic_signage"])
+            render_pa_announcement(message=em_state["pa_announcement"])
+            guard_logs = active_result.get("security_guard_log") or system.alert_manager.get_guard_log(limit=10)
+            render_security_guard_log(guard_logs=guard_logs, alert_manager=system.alert_manager)
+
+        st.markdown("---")
+        ann_rgb = cv2.cvtColor(active_result.get("annotated_frame", input_frame), cv2.COLOR_BGR2RGB)
+        st.image(ann_rgb, caption="Surveillance CCTV AI Annotated Feed (HUD)", use_container_width=True)
+        render_academic_disclaimer()
+        return
+
+    # -------------------------------------------------------------------------
+    # ROUTE TO ACTIVE SECTION (RESEARCH MODE)
+    # -------------------------------------------------------------------------
+    current_section = st.session_state.nav_section
+
+    if current_section == "🏠 Home":
+        _render_home_section(system=system, active_result=active_result, source_room=source_room, active_edge=active_edge)
+    elif current_section == "🔍 Analyze":
+        _render_analyze_section(
+            system=system,
+            source_room=source_room,
+            active_edge=active_edge,
+            conf_threshold=conf_threshold,
+            vulnerable_priority=vulnerable_priority,
+            vuln_category=vuln_category,
+            enable_frame_skip=enable_frame_skip,
+            frame_skip_val=frame_skip_val,
+            cloud_env=is_cloud_environment(),
+            now_ts=now_ts
+        )
+    elif current_section == "📊 Results":
+        _render_results_section(system=system, active_result=active_result, source_room=source_room, active_edge=active_edge, now_ts=now_ts)
+    elif current_section == "🗺️ Evacuation & Map":
+        _render_evacuation_section(
+            system=system,
+            active_result=active_result,
+            source_room=source_room,
+            active_edge=active_edge,
+            multi_floor_model=multi_floor_model,
+            vulnerable_priority=vulnerable_priority,
+            vuln_category=vuln_category,
+            dark_mode=st.session_state.dark_mode
+        )
+    elif current_section == "📡 Monitoring & Telemetry":
+        _render_monitoring_section(
+            system=system,
+            active_result=active_result,
+            source_room=source_room,
+            active_edge=active_edge,
+            frame_skip_val=frame_skip_val,
+            dark_mode=st.session_state.dark_mode
+        )
+    elif current_section == "🧠 Intelligence & XAI":
+        _render_intelligence_section(
+            system=system,
+            active_result=active_result,
+            source_room=source_room,
+            active_edge=active_edge,
+            now_ts=now_ts,
+            assistant=assistant
+        )
+    elif current_section == "📄 Reports & Validation":
+        _render_reports_section(
+            system=system,
+            active_result=active_result,
+            source_room=source_room,
+            active_edge=active_edge,
+            now_ts=now_ts
+        )
+
+    # Bottom academic disclaimer on every view
+    render_academic_disclaimer()
+
+    # Continuous monitoring loop auto-refresh
     if st.session_state.monitoring_active and st.session_state.video_stream is not None:
         time.sleep(0.04)
         st.rerun()
-    elif webrtc_playing_active and webrtc_auto_refresh:
-        time.sleep(0.15)
-        st.rerun()
-
 
 
 if __name__ == "__main__":

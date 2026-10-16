@@ -79,10 +79,16 @@ def test_building_graph():
     bg.visualize_graph(output_path=out_file)
     print(f"[+] Visualization exported: {out_file}")
 
+    # 5. Formal Assertion Checks for Pytest Compliance
+    assert len(g.nodes) == 7, f"Expected 7 nodes in demo building layout, found {len(g.nodes)}"
+    assert len(g.edges) == 7, f"Expected 7 edges in demo building layout, found {len(g.edges)}"
+    assert is_connected, "Graph must be fully connected across all rooms, corridors, and exits"
+    assert all_paths_valid, "All source rooms must have valid topological paths to all emergency exits"
+    assert out_file.exists(), f"Graph visualization file was not written to: {out_file}"
+
     print("\n" + "=" * 70)
     print("  PHASE 4 TEST COMPLETED SUCCESSFULLY")
     print("=" * 70 + "\n")
-    return True
 
 
 if __name__ == "__main__":
