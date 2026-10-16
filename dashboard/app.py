@@ -73,13 +73,26 @@ except ImportError:
 
 
 class BrowserWebcamProcessor(VideoProcessorBase):
-    """Thread-safe WebRTC video processor capturing browser webcam frames."""
+    """Thread-safe WebRTC video processor capturing and analyzing browser webcam frames."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.latest_frame: Optional[np.ndarray] = None
+        self.latest_annotated_frame: Optional[np.ndarray] = None
+        self.latest_result: Optional[Dict[str, Any]] = None
         self.frame_count: int = 0
         self.last_timestamp: float = 0.0
+        self.is_active: bool = False
+        self.system: Any = None
+        self.active_edge: Tuple[str, str] = ("CORRIDOR_1", "EXIT_A")
+        self.source_room: str = "ROOM_A"
+        self.process_every_n: int = 3
+        self._last_annotated_cache: Optional[np.ndarray] = None
+
+    def set_detection_active(self, active: bool) -> None:
+        """Toggles real-time AI perception and dynamic routing recomputation."""
+        with self._lock:
+            self.is_active = active
 
     def recv(self, frame: "av.VideoFrame") -> "av.VideoFrame":
         img = frame.to_ndarray(format="bgr24")
@@ -87,13 +100,60 @@ class BrowserWebcamProcessor(VideoProcessorBase):
             self.latest_frame = img.copy()
             self.frame_count += 1
             self.last_timestamp = time.time()
+            f_count = self.frame_count
+            active = self.is_active
+            system = self.system
+            active_edge = self.active_edge
+            source_room = self.source_room
+            skip = self.process_every_n
+            cached_ann = self._last_annotated_cache
+
+        annotated_bgr = img
+
+        if active and system is not None:
+            if f_count % skip == 0 or cached_ann is None:
+                try:
+                    res = system.process_frame(
+                        frame=img,
+                        active_edge=active_edge,
+                        source_room=source_room,
+                        enable_frame_skip=False
+                    )
+                    ensure_complete_emergency_state(
+                        system=system,
+                        result=res,
+                        source_room=source_room,
+                        active_edge=active_edge
+                    )
+                    annotated_bgr = res.get("annotated_frame", img)
+                    with self._lock:
+                        self.latest_annotated_frame = annotated_bgr.copy()
+                        self.latest_result = res
+                        self._last_annotated_cache = annotated_bgr.copy()
+                except Exception:
+                    pass
+            elif cached_ann is not None:
+                annotated_bgr = cached_ann
+
+        if WEBRTC_AVAILABLE:
+            return av.VideoFrame.from_ndarray(annotated_bgr, format="bgr24")
         return frame
 
     def get_latest_frame(self) -> Tuple[Optional[np.ndarray], int]:
+        """Backward-compatible tuple (frame_copy, frame_count) for existing tests."""
         with self._lock:
             if self.latest_frame is None:
                 return None, self.frame_count
             return self.latest_frame.copy(), self.frame_count
+
+    def get_latest_data(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[Dict[str, Any]], int]:
+        """Returns thread-safe decoupled copies of raw frame, annotated frame, detection results, and count."""
+        with self._lock:
+            raw = self.latest_frame.copy() if self.latest_frame is not None else None
+            ann = self.latest_annotated_frame.copy() if self.latest_annotated_frame is not None else None
+            res = self.latest_result.copy() if self.latest_result is not None else None
+            return raw, ann, res, self.frame_count
+
 
 try:
     from dashboard.components import (
@@ -753,6 +813,8 @@ def process_video_evaluation(
     processed_frames: List[np.ndarray] = []
     frame_results: List[Dict[str, Any]] = []
     peak_hazard = 0.0
+    peak_fire_conf = 0.0
+    peak_smoke_conf = 0.0
     peak_people = 0
     peak_density = 0.0
     route_changes = 0
@@ -792,6 +854,16 @@ def process_video_evaluation(
                 c_den = float(em.get("crowd_density", 0.0))
                 rec_ex = em.get("recommended_exit", "NONE")
 
+                fire_dets = res.get("fire_detections", [])
+                f_confs = [d["confidence"] for d in fire_dets if d.get("class_name") == "fire"]
+                s_confs = [d["confidence"] for d in fire_dets if d.get("class_name") == "smoke"]
+                cur_f_conf = max(f_confs) if f_confs else 0.0
+                cur_s_conf = max(s_confs) if s_confs else 0.0
+                if cur_f_conf > peak_fire_conf:
+                    peak_fire_conf = cur_f_conf
+                if cur_s_conf > peak_smoke_conf:
+                    peak_smoke_conf = cur_s_conf
+
                 if h_sc > peak_hazard:
                     peak_hazard = h_sc
                 if p_cnt > peak_people:
@@ -807,6 +879,8 @@ def process_video_evaluation(
                     "frame_idx": frame_idx,
                     "sampled_idx": sampled_idx,
                     "hazard_score": h_sc,
+                    "fire_conf": cur_f_conf,
+                    "smoke_conf": cur_s_conf,
                     "people_count": p_cnt,
                     "crowd_density": c_den,
                     "recommended_exit": rec_ex,
@@ -842,10 +916,13 @@ def process_video_evaluation(
         "source_resolution": f"{width}x{height}",
         "frame_skip": skip,
         "peak_hazard_score": round(peak_hazard, 3),
+        "peak_fire_conf": round(peak_fire_conf, 3),
+        "peak_smoke_conf": round(peak_smoke_conf, 3),
         "peak_people_count": peak_people,
         "peak_crowd_density": round(peak_density, 3),
         "route_changes_count": route_changes,
         "primary_recommended_exit": last_exit or "NONE",
+        "fire_detected_any": (peak_fire_conf > 0.0 or any(f.get("hazard_score", 0) > 0.4 for f in frame_results)),
         "frame_results": frame_results,
         "latest_result": last_result,
         "first_frame": processed_frames[0] if processed_frames else None,
@@ -968,8 +1045,8 @@ def _render_home_section(system, active_result, source_room, active_edge):
     </div>
     """, unsafe_allow_html=True)
 
-    # Two large, elegant primary action cards
-    col_img, col_vid = st.columns(2)
+    # Three large, elegant primary action cards
+    col_img, col_vid, col_cam = st.columns(3)
 
     with col_img:
         st.markdown("""
@@ -983,7 +1060,7 @@ def _render_home_section(system, active_result, source_room, active_edge):
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Choose Image ➔", key="home_btn_img", use_container_width=True, type="primary"):
+        if st.button("🖼️ Analyze Image ➔", key="home_btn_img", use_container_width=True, type="primary"):
             st.session_state.input_method = "Upload Image"
             st.session_state.nav_section = "🔍 Analyze"
             st.rerun()
@@ -995,25 +1072,52 @@ def _render_home_section(system, active_result, source_room, active_edge):
                 <div style="font-size: 2.75rem; margin-bottom: 10px;">🎬</div>
                 <h3 class="home-card-title">Upload Video</h3>
                 <p class="home-card-desc">
-                    Analyze sequential video footage for real-time hazard progression, crowd bottlenecks, and dynamic egress re-routing.
+                    Analyze sequential video footage (MP4, AVI, MOV) for real-time hazard progression, crowd bottlenecks, and dynamic egress re-routing.
                 </p>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        if st.button("Choose Video ➔", key="home_btn_vid", use_container_width=True, type="primary"):
+        if st.button("🎬 Analyze Video ➔", key="home_btn_vid", use_container_width=True, type="primary"):
             st.session_state.input_method = "Upload Video"
             st.session_state.nav_section = "🔍 Analyze"
             st.rerun()
 
-    # Subtle Live Camera option
-    st.markdown("<div style='text-align: center; margin-top: 18px;'>", unsafe_allow_html=True)
-    c_sub1, c_sub2, c_sub3 = st.columns([1, 1.4, 1])
-    with c_sub2:
-        if st.button("📹 Or use Live Camera Feed ➔", key="home_btn_cam", use_container_width=True):
+    with col_cam:
+        st.markdown("""
+        <div class="home-choice-card">
+            <div>
+                <div style="font-size: 2.75rem; margin-bottom: 10px;">📹</div>
+                <h3 class="home-card-title">Live Camera</h3>
+                <p class="home-card-desc">
+                    Stream live surveillance directly from your browser webcam or network camera for real-time AI perception and egress guidance.
+                </p>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        if st.button("▶️ Start Live Detection ➔", key="home_btn_cam", use_container_width=True, type="primary"):
             st.session_state.input_method = "Live Camera"
+            st.session_state.nav_section = "📹 Live Camera"
+            st.session_state.live_detection_active = True
+            st.rerun()
+
+    # Prominent Quick Action Controls Bar
+    st.markdown("<div style='margin-top: 18px;'></div>", unsafe_allow_html=True)
+    qa_c1, qa_c2, qa_c3 = st.columns(3)
+    with qa_c1:
+        if st.button("🎬 Analyze Video Now ➔", key="home_qa_vid", use_container_width=True):
+            st.session_state.input_method = "Upload Video"
             st.session_state.nav_section = "🔍 Analyze"
             st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+    with qa_c2:
+        if st.button("▶️ Start Live Detection Now ➔", key="home_qa_cam", use_container_width=True):
+            st.session_state.input_method = "Live Camera"
+            st.session_state.nav_section = "📹 Live Camera"
+            st.session_state.live_detection_active = True
+            st.rerun()
+    with qa_c3:
+        if st.button("📊 View Live Results ➔", key="home_qa_res", use_container_width=True):
+            st.session_state.nav_section = "📊 Results"
+            st.rerun()
 
     # Active evaluation banner if results exist in cache
     has_image_cache = st.session_state.get("image_eval_cache") is not None
@@ -1343,7 +1447,18 @@ def _render_analyze_section(system, source_room, active_edge, conf_threshold, vu
             def vid_callback(curr, total, cur_res):
                 frac = min(1.0, curr / max(1, total))
                 p_bar.progress(frac)
-                status_txt.text(f"Analyzing frame {curr}/{total} — Hazard: {cur_res['hazard_score']:.3f} — Dynamic Exit: {cur_res['recommended_exit']}")
+                h_sc = cur_res.get("hazard_score", 0.0)
+                f_cf = cur_res.get("fire_conf", 0.0)
+                s_cf = cur_res.get("smoke_conf", 0.0)
+                p_cnt = cur_res.get("people_count", 0)
+                c_den = cur_res.get("crowd_density", 0.0)
+                rec_ex = cur_res.get("recommended_exit", "NONE")
+                f_str = f"🔥 Fire: {f_cf*100:.1f}%" if f_cf > 0 else "🟢 Fire: None"
+                status_txt.markdown(
+                    f"**Processing Frame {curr}/{total}** ({frac*100:.0f}%) | "
+                    f"{f_str} | 👥 Occupants: {p_cnt} | 🚶 Density: {c_den:.2f} | "
+                    f"⚠️ Hazard: {h_sc:.3f} | 🚪 Recommended Exit: **{rec_ex}**"
+                )
 
             with st.spinner("Processing video frames through Dual YOLOv8 & Dynamic Dijkstra..."):
                 sum_vid, mp4_out, err_v = process_video_evaluation(
@@ -1357,16 +1472,23 @@ def _render_analyze_section(system, source_room, active_edge, conf_threshold, vu
                 )
 
             if err_v is not None:
-                st.error(f"Video Analysis Failed: {err_v}")
+                st.error(f"⚠️ Video Analysis Failed: {err_v}. Please ensure the video is an MP4, AVI, or MOV file encoded with H.264 or standard MPEG-4 codecs.")
             else:
                 st.session_state.video_eval_cache = {
                     "summary": sum_vid,
                     "mp4_bytes": mp4_out,
                     "source_name": target_vid_name
                 }
+                # Synchronize latest keyframe into image_eval_cache for immediate Results tab display
+                if sum_vid.get("latest_result") is not None and sum_vid.get("first_frame") is not None:
+                    st.session_state.image_eval_cache = {
+                        "result": sum_vid["latest_result"],
+                        "raw_frame": sum_vid["first_frame"],
+                        "source_name": f"Video: {target_vid_name}"
+                    }
                 st.session_state.incident_events.append({
                     "time": now_ts,
-                    "desc": f"Video Analysis completed ({target_vid_name}): {sum_vid['processed_frames_count']} frames analyzed, Peak Hazard={sum_vid['peak_hazard_score']}, Exit={sum_vid['primary_recommended_exit']}."
+                    "desc": f"Video Analysis completed ({target_vid_name}): {sum_vid['processed_frames_count']} frames analyzed, Peak Fire Conf={sum_vid.get('peak_fire_conf', 0.0)*100:.1f}%, Peak Hazard={sum_vid['peak_hazard_score']}, Exit={sum_vid['primary_recommended_exit']}."
                 })
                 st.session_state.nav_section = "📊 Results"
                 st.success("✅ Video Analysis Complete! Navigating to Results...")
@@ -1382,56 +1504,297 @@ def _render_analyze_section(system, source_room, active_edge, conf_threshold, vu
     # WORKFLOW C: LIVE CAMERA
     # -------------------------------------------------------------------------
     else:
-        st.caption("Stream live video from your browser webcam or a local camera device. Frames route into real-time hazard detection and evacuation guidance.")
+        _render_live_camera_section(
+            system=system,
+            source_room=source_room,
+            active_edge=active_edge,
+            conf_threshold=conf_threshold,
+            dark_mode=st.session_state.get("dark_mode", False),
+            now_ts=now_ts
+        )
 
-        cam_c1, cam_c2 = st.columns([1.4, 1.0])
-        with cam_c1:
-            if WEBRTC_AVAILABLE:
-                st.markdown("**Live Browser Webcam (WebRTC)**")
-                rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]})
-                webrtc_ctx = webrtc_streamer(
-                    key="clean-ai-browser-webrtc",
-                    mode=WebRtcMode.SENDRECV,
-                    rtc_configuration=rtc_config,
-                    video_processor_factory=BrowserWebcamProcessor,
-                    media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
-                    async_processing=True,
-                )
-                if webrtc_ctx.state.playing and webrtc_ctx.video_processor is not None:
-                    b_frame, b_count = webrtc_ctx.video_processor.get_latest_frame()
-                    if b_frame is not None:
-                        res_live = system.process_frame(frame=b_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
-                        st.session_state.image_eval_cache = {
-                            "result": res_live,
-                            "raw_frame": b_frame,
-                            "source_name": f"Live_Webcam_Frame_{b_count}"
-                        }
-            else:
-                cam_photo = st.camera_input("📸 Capture Frame from Browser Camera")
-                if cam_photo is not None:
-                    b_arr = np.frombuffer(cam_photo.getvalue(), dtype=np.uint8)
-                    c_frame = cv2.imdecode(b_arr, cv2.IMREAD_COLOR)
-                    if c_frame is not None:
-                        res_live = system.process_frame(frame=c_frame, active_edge=active_edge, source_room=source_room, enable_frame_skip=False)
-                        st.session_state.image_eval_cache = {
-                            "result": res_live,
-                            "raw_frame": c_frame,
-                            "source_name": "Webcam_Snapshot"
-                        }
-                        st.success("Snapshot captured and analyzed! View Results tab.")
 
-        with cam_c2:
-            st.markdown("""
-            <div class="clean-metric-card" style="text-align: left;">
-                <h4 style="margin: 0 0 8px 0; color: var(--text-primary); font-size: 1rem;">Live Stream Guidance</h4>
-                <p style="font-size: 0.85rem; color: var(--text-muted); margin-bottom: 12px; line-height: 1.5;">
-                    Click <strong>START</strong> in the player to stream video. The system processes incoming frames and updates dynamic evacuation guidance in real-time.
-                </p>
-                <div style="font-size: 0.8rem; color: var(--text-secondary); background: var(--blue-soft); border-radius: 6px; padding: 8px;">
-                    ℹ️ For hardware USB or RTSP cameras, configure them in the <strong>Advanced Settings</strong> sidebar expander.
+def _render_live_results_panel(result: Optional[Dict[str, Any]], source_name: str = "Live Browser Camera", is_active: bool = False, dark_mode: bool = False) -> None:
+    """
+    Renders real-time live perception and dynamic routing telemetry.
+    Distinguishes genuine Dual YOLOv8 inference from simulated data.
+    """
+    st.markdown("#### 📊 Live Results")
+
+    if result is not None:
+        # Genuine AI Model Detection Badge
+        st.markdown("""
+        <div style="display: inline-flex; align-items: center; gap: 8px; background: rgba(16, 185, 129, 0.15); border: 1px solid #10B981; border-radius: 9999px; padding: 4px 14px; color: #059669; font-size: 0.82rem; font-weight: 700; margin-bottom: 12px;">
+            <span>●</span> REAL MODEL DETECTION — LIVE BROWSER FEED
+        </div>
+        """, unsafe_allow_html=True)
+
+        em = result.get("emergency_state", {})
+        fire_dets = result.get("fire_detections", [])
+        f_confs = [d["confidence"] for d in fire_dets if d.get("class_name") == "fire"]
+        s_confs = [d["confidence"] for d in fire_dets if d.get("class_name") == "smoke"]
+        fire_conf = max(f_confs) if f_confs else 0.0
+        smoke_conf = max(s_confs) if s_confs else 0.0
+
+        has_fire = em.get("fire_detected", result.get("fire_detected", fire_conf > 0.0))
+        has_smoke = em.get("smoke_detected", result.get("smoke_detected", smoke_conf > 0.0))
+        people_count = em.get("people_count", result.get("people_detected", 0))
+        crowd_density = float(em.get("crowd_density", result.get("crowd_density", 0.0)))
+        hazard_score = float(em.get("hazard_score", result.get("hazard_score", 0.0)))
+        rec_exit = em.get("recommended_exit", result.get("recommended_exit", "EXIT_A"))
+        rec_route = em.get("recommended_route", result.get("recommended_route", []))
+        rec_route_str = " ➔ ".join(rec_route) if rec_route else "Direct egress"
+        total_cost = float(em.get("total_route_cost", result.get("total_route_cost", 0.0)))
+        route_diverted = bool(em.get("is_diverted_from_baseline", False))
+        avoided_exit = em.get("avoided_exit")
+
+        # 4 Telemetry Metric Cards
+        m_c1, m_c2 = st.columns(2)
+        with m_c1:
+            if has_fire:
+                st.markdown(f"""
+                <div class="clean-metric-card" style="border-left: 4px solid #EF4444; text-align: left;">
+                    <div style="font-size: 0.8rem; color: #DC2626; font-weight: 700;">🔥 FIRE DETECTED</div>
+                    <div style="font-size: 1.4rem; font-weight: 800; color: #DC2626;">{fire_conf*100:.1f}% Conf</div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">Active flame signature verified</div>
                 </div>
+                """, unsafe_allow_html=True)
+            elif has_smoke:
+                st.markdown(f"""
+                <div class="clean-metric-card" style="border-left: 4px solid #F59E0B; text-align: left;">
+                    <div style="font-size: 0.8rem; color: #D97706; font-weight: 700;">💨 SMOKE DETECTED</div>
+                    <div style="font-size: 1.4rem; font-weight: 800; color: #D97706;">{smoke_conf*100:.1f}% Conf</div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">Atmospheric plume verified</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                st.markdown("""
+                <div class="clean-metric-card" style="border-left: 4px solid #10B981; text-align: left;">
+                    <div style="font-size: 0.8rem; color: #059669; font-weight: 700;">🟢 NO FIRE DETECTED</div>
+                    <div style="font-size: 1.4rem; font-weight: 800; color: #059669;">0.0% Conf</div>
+                    <div style="font-size: 0.75rem; color: var(--text-muted);">Corridor thermal profile nominal</div>
+                </div>
+                """, unsafe_allow_html=True)
+
+            haz_color = "#DC2626" if hazard_score > 0.7 else ("#D97706" if hazard_score > 0.4 else "#059669")
+            haz_level = "CRITICAL" if hazard_score > 0.7 else ("ELEVATED" if hazard_score > 0.4 else "NOMINAL")
+            st.markdown(f"""
+            <div class="clean-metric-card" style="margin-top: 10px; border-left: 4px solid {haz_color}; text-align: left;">
+                <div style="font-size: 0.8rem; color: {haz_color}; font-weight: 700;">⚠️ HAZARD SCORE</div>
+                <div style="font-size: 1.4rem; font-weight: 800; color: {haz_color};">{hazard_score:.3f}</div>
+                <div style="font-size: 0.75rem; color: var(--text-muted);">Risk Category: {haz_level}</div>
             </div>
             """, unsafe_allow_html=True)
+
+        with m_c2:
+            cong_label = "HIGH CONGESTION" if crowd_density >= 0.7 else ("MODERATE" if crowd_density >= 0.35 else "LOW / NOMINAL")
+            cong_color = "#DC2626" if crowd_density >= 0.7 else ("#D97706" if crowd_density >= 0.35 else "#059669")
+            st.markdown(f"""
+            <div class="clean-metric-card" style="border-left: 4px solid {cong_color}; text-align: left;">
+                <div style="font-size: 0.8rem; color: var(--text-muted); font-weight: 700;">👥 OCCUPANTS &amp; DENSITY</div>
+                <div style="font-size: 1.4rem; font-weight: 800; color: var(--text-primary);">{people_count} Occupants</div>
+                <div style="font-size: 0.75rem; color: {cong_color}; font-weight: 600;">Density: {crowd_density:.2f} ({cong_label})</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+            exit_color = "#DC2626" if route_diverted else "#059669"
+            exit_badge = "🚨 DIVERTED ROUTE" if route_diverted else "🟢 DIRECT EGRESS"
+            st.markdown(f"""
+            <div class="clean-metric-card" style="margin-top: 10px; border-left: 4px solid {exit_color}; text-align: left;">
+                <div style="font-size: 0.8rem; color: {exit_color}; font-weight: 700;">🚪 RECOMMENDED EXIT</div>
+                <div style="font-size: 1.4rem; font-weight: 800; color: var(--text-primary);">{rec_exit}</div>
+                <div style="font-size: 0.75rem; color: {exit_color}; font-weight: 600;">{exit_badge} (Cost: {total_cost:.2f})</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # Dynamic Route Breadcrumbs
+        st.markdown(f"""
+        <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 12px 16px; margin-top: 12px; font-size: 0.88rem;">
+            <div style="font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">Dynamic Evacuation Route:</div>
+            <code style="font-size: 0.95rem; color: var(--primary-blue); font-weight: 600;">{rec_route_str}</code>
+        </div>
+        """, unsafe_allow_html=True)
+
+        if avoided_exit:
+            st.markdown(f"""
+            <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid #EF4444; border-radius: 8px; padding: 10px 14px; margin-top: 8px; color: #DC2626; font-size: 0.84rem;">
+                ⚠️ <strong>Avoided Compromised Exit:</strong> <code>{avoided_exit}</code> (Hazard zone bypass applied).
+            </div>
+            """, unsafe_allow_html=True)
+
+        st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
+        if st.button("📊 View Full Detailed Results in Results Tab ➔", key="live_res_tab_btn", use_container_width=True, type="primary"):
+            st.session_state.nav_section = "📊 Results"
+            st.rerun()
+
+    else:
+        st.markdown("""
+        <div style="display: inline-flex; align-items: center; gap: 8px; background: rgba(100, 116, 139, 0.12); border: 1px solid #64748B; border-radius: 9999px; padding: 4px 14px; color: #64748B; font-size: 0.82rem; font-weight: 700; margin-bottom: 12px;">
+            <span>○</span> STANDBY — AWAITING FRAME INPUT
+        </div>
+        <div style="background: var(--bg-surface); border: 1px dashed var(--border-strong); border-radius: 8px; padding: 32px 20px; text-align: center; color: var(--text-muted); font-size: 0.9rem;">
+            <div style="font-size: 2rem; margin-bottom: 8px;">📹</div>
+            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">No Live Inference Active Yet</div>
+            <p style="margin: 0; line-height: 1.5;">
+                Click <strong>▶️ Start Live Detection</strong> and start your browser camera feed, or capture a frame with the snapshot tool.<br>
+                Real model detections and dynamic evacuation guidance will appear here in real-time.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+def _render_live_camera_section(system, source_room, active_edge, conf_threshold, dark_mode=False, now_ts=""):
+    """
+    Renders dedicated Live Browser Camera streaming, real-time perception, and live results.
+    Fully compatible with Streamlit Cloud and local client browsers.
+    """
+    st.markdown('<div class="section-header">LIVE CAMERA SURVEILLANCE & REAL-TIME PERCEPTION</div>', unsafe_allow_html=True)
+
+    st.session_state.setdefault("live_detection_active", False)
+    st.session_state.setdefault("live_latest_result", None)
+    st.session_state.setdefault("live_latest_frame", None)
+    st.session_state.setdefault("live_latest_raw", None)
+
+    # 1. Prominent Top Action Controls
+    top_c1, top_c2, top_c3 = st.columns([1.2, 1.2, 1.4])
+    with top_c1:
+        if st.session_state.live_detection_active:
+            st.button("🟢 Live Detection Running", disabled=True, use_container_width=True)
+        else:
+            if st.button("▶️ Start Live Detection", type="primary", use_container_width=True, key="live_sec_start"):
+                st.session_state.live_detection_active = True
+                st.session_state.monitoring_active = True
+                st.rerun()
+    with top_c2:
+        if not st.session_state.live_detection_active:
+            st.button("⏹️ Live Detection Paused", disabled=True, use_container_width=True)
+        else:
+            if st.button("⏹️ Stop Live Detection", use_container_width=True, key="live_sec_stop"):
+                st.session_state.live_detection_active = False
+                st.session_state.monitoring_active = False
+                st.rerun()
+    with top_c3:
+        if st.button("📊 Live Results in Results Tab ➔", use_container_width=True, key="live_sec_view_res"):
+            st.session_state.nav_section = "📊 Results"
+            st.rerun()
+
+    # 2. Real-time Status Banner
+    if st.session_state.live_detection_active:
+        st.markdown("""
+        <div style="background: rgba(22, 163, 74, 0.12); border: 1px solid #16A34A; border-radius: 8px; padding: 10px 16px; color: #16A34A; font-weight: 600; font-size: 0.92rem; margin: 12px 0 16px 0;">
+            🟢 <strong>LIVE AI DETECTION ACTIVE:</strong> Real-time frame processing through Dual YOLOv8 and Dynamic Dijkstra routing is active.
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown("""
+        <div style="background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 10px 16px; color: var(--text-muted); font-size: 0.92rem; margin: 12px 0 16px 0;">
+            ⚪ <strong>LIVE DETECTION STANDBY:</strong> Video stream on standby. Click <strong>▶️ Start Live Detection</strong> above to activate real-time YOLO perception.
+        </div>
+        """, unsafe_allow_html=True)
+
+    # 3. Environment & Compatibility Assessment Notice
+    cloud_env = is_cloud_environment()
+    if cloud_env:
+        st.info("☁️ **Streamlit Cloud Environment Detected:** Server webcams (`cv2.VideoCapture(0)`) are physically absent on cloud servers and disabled to prevent server crashes. Live camera streaming operates securely inside your browser via WebRTC with client-side encryption. Fallback HTTP snapshot capture is also fully supported.")
+    else:
+        st.caption("💻 **Local Machine Detected:** WebRTC browser camera streaming and local camera scanning are supported.")
+
+    # 4. Stream & Live Results Layout
+    cam_c1, cam_c2 = st.columns([1.2, 1.0])
+
+    with cam_c1:
+        st.markdown("##### 📹 Live Browser Camera Stream (WebRTC)")
+        if WEBRTC_AVAILABLE:
+            rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]})
+            webrtc_ctx = webrtc_streamer(
+                key="live-camera-workspace-webrtc",
+                mode=WebRtcMode.SENDRECV,
+                rtc_configuration=rtc_config,
+                video_processor_factory=BrowserWebcamProcessor,
+                media_stream_constraints={"video": {"width": {"ideal": 640}, "height": {"ideal": 480}}, "audio": False},
+                async_processing=True,
+            )
+            if webrtc_ctx.video_processor:
+                webrtc_ctx.video_processor.system = system
+                webrtc_ctx.video_processor.source_room = source_room
+                webrtc_ctx.video_processor.active_edge = active_edge
+                webrtc_ctx.video_processor.set_detection_active(st.session_state.live_detection_active)
+
+                raw_f, ann_f, live_res, f_cnt = webrtc_ctx.video_processor.get_latest_data()
+                if live_res is not None:
+                    st.session_state.live_latest_result = live_res
+                    st.session_state.live_latest_frame = ann_f
+                    st.session_state.live_latest_raw = raw_f
+                    st.session_state.image_eval_cache = {
+                        "result": live_res,
+                        "raw_frame": raw_f,
+                        "source_name": f"Live_Webcam_Frame_{f_cnt}"
+                    }
+        else:
+            st.warning("⚠️ WebRTC component (`streamlit-webrtc`) is not installed. Please use the HTTP Browser Camera Snapshot below.")
+
+        st.markdown("---")
+        st.markdown("##### 📸 Browser Camera Snapshot Fallback (HTTP)")
+        cam_shot = st.camera_input("Capture frame from camera", key="live_cam_snapshot_workspace")
+        if cam_shot is not None:
+            b_arr = np.frombuffer(cam_shot.getvalue(), dtype=np.uint8)
+            shot_frame = cv2.imdecode(b_arr, cv2.IMREAD_COLOR)
+            if shot_frame is not None:
+                with st.spinner("Analyzing captured camera frame..."):
+                    res_live = system.process_frame(
+                        frame=shot_frame,
+                        active_edge=active_edge,
+                        source_room=source_room,
+                        enable_frame_skip=False
+                    )
+                    ensure_complete_emergency_state(
+                        system=system,
+                        result=res_live,
+                        source_room=source_room,
+                        active_edge=active_edge
+                    )
+                    st.session_state.live_latest_result = res_live
+                    st.session_state.live_latest_frame = res_live.get("annotated_frame", shot_frame)
+                    st.session_state.live_latest_raw = shot_frame
+                    st.session_state.image_eval_cache = {
+                        "result": res_live,
+                        "raw_frame": shot_frame,
+                        "source_name": "Live_Camera_Snapshot"
+                    }
+                    st.success("✅ Frame captured and analyzed by Dual YOLOv8 models!")
+
+        # Camera Permission Instructions Expander
+        with st.expander("🔐 Browser Camera Permission & Troubleshooting Guide", expanded=False):
+            st.markdown("""
+            **How to grant camera permissions in your browser:**
+            - **Google Chrome / Brave / Chromium:**
+              1. Click the site settings icon (padlock or sliders) on the left of the URL address bar.
+              2. Toggle **Camera** to **Allow**.
+              3. Click **Reload** to apply changes.
+            - **Microsoft Edge:**
+              1. Click the padlock icon in the address bar.
+              2. Select **Permissions for this site** ➔ set **Camera** to **Allow**.
+              3. Reload the dashboard tab.
+            - **Mozilla Firefox:**
+              1. Click the permissions icon on the left side of the address bar.
+              2. Clear any blocked permissions and click **Allow** when prompted.
+            - **Apple Safari:**
+              1. Open **Settings / Preferences** ➔ **Websites** ➔ **Camera**.
+              2. Locate this website URL and choose **Allow**.
+
+            **Troubleshooting Permission Denied:**
+            - If you previously denied camera access, click the camera icon with the red 'X' in your browser's URL address bar and change the setting to **Always allow**.
+            - Ensure no other application (Zoom, Teams, Skype, OBS) is currently locking your camera hardware.
+            - On Streamlit Cloud, browser webcam streams are transmitted directly from client browser to WebRTC peer-connection with TLS encryption; no physical server hardware is touched.
+            """)
+
+    with cam_c2:
+        _render_live_results_panel(
+            result=st.session_state.get("live_latest_result"),
+            source_name="Live Camera",
+            is_active=st.session_state.live_detection_active,
+            dark_mode=dark_mode
+        )
 
 
 def _render_results_section(system, active_result, source_room, active_edge, now_ts):
@@ -1477,6 +1840,13 @@ def _render_results_section(system, active_result, source_room, active_edge, now
     res_c1, res_c2 = st.columns([1.2, 1.0])
 
     with res_c1:
+        cached_img = st.session_state.get("image_eval_cache")
+        if cached_img and any(k in str(cached_img.get("source_name", "")) for k in ["Live_Webcam", "Live_Camera", "Webcam"]):
+            st.markdown("""
+            <div style="display: inline-flex; align-items: center; gap: 8px; background: rgba(16, 185, 129, 0.15); border: 1px solid #10B981; border-radius: 9999px; padding: 4px 14px; color: #059669; font-size: 0.82rem; font-weight: 700; margin-bottom: 10px;">
+                <span>●</span> REAL MODEL DETECTION — LIVE BROWSER CAMERA
+            </div>
+            """, unsafe_allow_html=True)
         st.markdown("**AI ANNOTATED PERCEPTION HUD (Dual YOLOv8 Output)**")
         ann_frame = active_result.get("annotated_frame")
         if ann_frame is not None:
@@ -1513,18 +1883,52 @@ def _render_results_section(system, active_result, source_room, active_edge, now
         render_simulated_led_signage(signage_dict=signage_dict)
         render_pa_announcement(message=pa_announcement)
 
+    # RECORDED VIDEO PLAYER & EVALUATION SUMMARY (IF AVAILABLE)
+    cached_vid = st.session_state.get("video_eval_cache")
+    if cached_vid is not None and cached_vid.get("source_name"):
+        st.markdown("<div style='margin-top: 20px;'></div>", unsafe_allow_html=True)
+        with st.expander("🎬 Recorded Video Analysis & Processed Video Player", expanded=True):
+            v_sum = cached_vid.get("summary", {})
+            st.markdown(f"**Source Video:** `{cached_vid['source_name']}` | **Frames Evaluated:** {v_sum.get('processed_frames_count', 0)} frames")
+
+            v_m1, v_m2, v_m3, v_m4 = st.columns(4)
+            with v_m1:
+                st.metric("Peak Fire Conf", f"{v_sum.get('peak_fire_conf', 0.0)*100:.1f}%")
+            with v_m2:
+                st.metric("Peak Occupants", f"{v_sum.get('peak_people_count', 0)}")
+            with v_m3:
+                st.metric("Peak Density", f"{v_sum.get('peak_crowd_density', 0.0):.2f}")
+            with v_m4:
+                st.metric("Peak Hazard", f"{v_sum.get('peak_hazard_score', 0.0):.3f}")
+
+            mp4_bytes = cached_vid.get("mp4_bytes", b"")
+            if mp4_bytes:
+                st.video(mp4_bytes)
+                st.download_button(
+                    label="📥 Download Processed Video (.MP4)",
+                    data=mp4_bytes,
+                    file_name=f"annotated_{cached_vid['source_name'].rsplit('.', 1)[0]}.mp4",
+                    mime="video/mp4",
+                    key="results_dl_mp4_btn",
+                    use_container_width=True
+                )
+
     # QUICK NAVIGATION ACTION BUTTONS
     st.markdown("<div style='margin-top: 24px;'></div>", unsafe_allow_html=True)
-    act_c1, act_c2, act_c3 = st.columns(3)
+    act_c1, act_c2, act_c3, act_c4 = st.columns(4)
     with act_c1:
         if st.button("🔍 Analyze Another File", use_container_width=True):
             st.session_state.nav_section = "🔍 Analyze"
             st.rerun()
     with act_c2:
+        if st.button("📹 Live Camera Feed ➔", use_container_width=True):
+            st.session_state.nav_section = "📹 Live Camera"
+            st.rerun()
+    with act_c3:
         if st.button("🗺️ View Evacuation & Map ➔", use_container_width=True, type="primary"):
             st.session_state.nav_section = "🗺️ Evacuation & Map"
             st.rerun()
-    with act_c3:
+    with act_c4:
         if st.button("📄 Generate Incident Reports ➔", use_container_width=True):
             st.session_state.nav_section = "📄 Reports & Validation"
             st.rerun()
@@ -2167,6 +2571,14 @@ def main():
         st.session_state.image_eval_cache = None
     if "video_eval_cache" not in st.session_state:
         st.session_state.video_eval_cache = None
+    if "live_detection_active" not in st.session_state:
+        st.session_state.live_detection_active = False
+    if "live_latest_result" not in st.session_state:
+        st.session_state.live_latest_result = None
+    if "live_latest_frame" not in st.session_state:
+        st.session_state.live_latest_frame = None
+    if "live_latest_raw" not in st.session_state:
+        st.session_state.live_latest_raw = None
     if "discovered_cameras" not in st.session_state:
         st.session_state.discovered_cameras = None
     if "last_camera_error" not in st.session_state:
@@ -2192,6 +2604,7 @@ def main():
     nav_options = [
         "🏠 Home",
         "🔍 Analyze",
+        "📹 Live Camera",
         "📊 Results",
         "🗺️ Evacuation & Map",
         "📡 Monitoring & Telemetry",
@@ -2205,6 +2618,25 @@ def main():
     selected_nav = st.sidebar.radio("Navigation", options=nav_options, index=nav_index, label_visibility="collapsed")
     if selected_nav != st.session_state.nav_section:
         st.session_state.nav_section = selected_nav
+        st.rerun()
+
+    # Sidebar Quick Controls
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### ⚡ Quick Controls")
+    qc1, qc2 = st.sidebar.columns(2)
+    with qc1:
+        if st.sidebar.button("🎬 Analyze Video", key="sb_quick_vid", use_container_width=True):
+            st.session_state.input_method = "Upload Video"
+            st.session_state.nav_section = "🔍 Analyze"
+            st.rerun()
+    with qc2:
+        if st.sidebar.button("▶️ Start Live", key="sb_quick_live", use_container_width=True):
+            st.session_state.input_method = "Live Camera"
+            st.session_state.nav_section = "📹 Live Camera"
+            st.session_state.live_detection_active = True
+            st.rerun()
+    if st.sidebar.button("📊 Live Results", key="sb_quick_res", use_container_width=True):
+        st.session_state.nav_section = "📊 Results"
         st.rerun()
 
     # Determine Active Hazard Status for Status Indicator
@@ -2421,6 +2853,15 @@ def main():
             enable_frame_skip=enable_frame_skip,
             frame_skip_val=frame_skip_val,
             cloud_env=is_cloud_environment(),
+            now_ts=now_ts
+        )
+    elif current_section == "📹 Live Camera":
+        _render_live_camera_section(
+            system=system,
+            source_room=source_room,
+            active_edge=active_edge,
+            conf_threshold=conf_threshold,
+            dark_mode=st.session_state.dark_mode,
             now_ts=now_ts
         )
     elif current_section == "📊 Results":
